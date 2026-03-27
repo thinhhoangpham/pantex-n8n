@@ -1,0 +1,1963 @@
+{
+    "updatedAt": "2026-03-27T04:34:41.992Z",
+    "createdAt": "2026-03-24T18:51:52.646Z",
+    "id": "EPobOCC4V3tBomcw",
+    "name": "Dispatcher Agent",
+    "description": null,
+    "active": true,
+    "isArchived": false,
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "dispatcher",
+                "responseMode": "responseNode",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2.1,
+            "position": [
+                0,
+                300
+            ],
+            "id": "a1111111-1111-4111-8111-111111111111",
+            "name": "Webhook",
+            "webhookId": "disp-wh-1"
+        },
+        {
+            "parameters": {
+                "fileSelector": "/data/metadata/source_catalog.json",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.readWriteFile",
+            "typeVersion": 1.1,
+            "position": [
+                220,
+                300
+            ],
+            "id": "a2222222-2222-4222-8222-222222222222",
+            "name": "Read Source Catalog"
+        },
+        {
+            "parameters": {
+                "jsCode": "const baseUrl = 'http://duckdb-service:8001/query';\nconst database = '/data/vault.duckdb';\nconst listSql =\n  \"SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' ORDER BY table_name\";\n\nreturn (async () => {\n  const listRes = await this.helpers.httpRequest({\n    method: 'POST',\n    url: baseUrl,\n    headers: { 'content-type': 'application/json' },\n    body: { sql: listSql, database },\n    json: true,\n  });\n\n  const rows = listRes.rows || [];\n  const byName = {};\n  for (const r of rows) {\n    const name = r.table_name;\n    if (!name) continue;\n    byName[name] = { table_name: name, max_insert_dts: null };\n  }\n  const marts = rows.filter((r) => String(r.table_name || '').startsWith('mart_'));\n  try {\n    if (marts.length > 0) {\n      const unionSql = marts\n        .map((r) => {\n          const n = String(r.table_name);\n          const safeIdent = n.replace(/\"/g, '\"\"');\n          return (\n            \"SELECT '\" +\n            n.replace(/'/g, \"''\") +\n            \"' AS table_name, MAX(mart_insert_dts) AS max_insert_dts FROM \\\"\" +\n            safeIdent +\n            '\"'\n          );\n        })\n        .join(' UNION ALL ');\n      const martRes = await this.helpers.httpRequest({\n        method: 'POST',\n        url: baseUrl,\n        headers: { 'content-type': 'application/json' },\n        body: { sql: unionSql, database },\n        json: true,\n      });\n      for (const r of martRes.rows || []) {\n        const tn = r.table_name;\n        if (Object.prototype.hasOwnProperty.call(byName, tn)) {\n          byName[tn].max_insert_dts = r.max_insert_dts;\n        }\n      }\n    }\n  } catch (e) {\n    // mart_insert_dts may be missing or table not readable; leave max_insert_dts null\n  }\n\n  return [{ json: { output: { data: Object.values(byName) } } }];\n})();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                440,
+                300
+            ],
+            "id": "a3333333-3333-4333-8333-333333333333",
+            "name": "Inspect Tables"
+        },
+        {
+            "parameters": {
+                "jsCode": "const inspectResult = $input.first().json;\nconst webhookData = $('Webhook').first().json.body;\nconst catalogFile = $('Read Source Catalog').first().json;\nlet catalog;\ntry {\n  if (catalogFile.data) catalog = JSON.parse(Buffer.from(catalogFile.data, 'base64').toString('utf-8'));\n  else catalog = catalogFile;\n} catch(e) { catalog = catalogFile; }\nconst tables = inspectResult.output ? (inspectResult.output.data || []) : [];\nconst now = new Date();\nconst H24 = 24*60*60*1000;\nconst H48 = 48*60*60*1000;\nconst existingTables = [];\nconst staleMarts = [];\nconst expiredMarts = [];\nconst freshMarts = [];\nfor (const t of tables) {\n  const name = t.table_name;\n  existingTables.push(name);\n  if (name.startsWith('mart_')) {\n    const age = t.max_insert_dts && t.max_insert_dts !== 'NaT'\n      ? (now - new Date(t.max_insert_dts))\n      : Infinity;\n    if (isNaN(age) || age > H48) expiredMarts.push(name);\n    else if (age > H24) staleMarts.push(name);\n    else freshMarts.push(name);\n  }\n}\nreturn [{\n  json: {\n    user_request: webhookData.user_request,\n    catalog,\n    existing_tables: existingTables,\n    fresh_marts: freshMarts,\n    stale_marts: staleMarts,\n    expired_marts: expiredMarts,\n    vault_tables: existingTables.filter(t => t.startsWith('hub_') || t.startsWith('lnk_') || t.startsWith('sat_'))\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                660,
+                300
+            ],
+            "id": "a4444444-4444-4444-8444-444444444444",
+            "name": "Classify Tables"
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "http://duckdb-service:8001/execute-batch",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ (() => { const exp=$json.expired_marts||[]; if(!exp.length) return {statements:[\"SELECT 1\"],database:\"/data/vault.duckdb\"}; return {statements:exp.map(t=>\"DROP TABLE IF EXISTS \"+t),database:\"/data/vault.duckdb\"}; })() }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                880,
+                300
+            ],
+            "id": "a5555555-5555-4555-8555-555555555555",
+            "name": "Cleanup Stale Marts"
+        },
+        {
+            "parameters": {
+                "jsCode": "const data = $('Classify Tables').first().json;\nconst currentTables = data.existing_tables.filter(t => !data.expired_marts.includes(t));\nconst context = \"USER QUESTION: \" + data.user_request + \"\\n\\nSOURCE CATALOG:\\n\" + JSON.stringify(data.catalog, null, 2) + \"\\n\\nEXISTING TABLES IN VAULT:\\n\" + (currentTables.length ? currentTables.join(\", \") : \"(none)\") + \"\\n\\nFRESH MARTS (<24h):\\n\" + (data.fresh_marts.length ? data.fresh_marts.join(\", \") : \"(none)\") + \"\\n\\nSTALE MARTS (24-48h):\\n\" + (data.stale_marts.length ? data.stale_marts.join(\", \") : \"(none)\") + \"\\n\\nEXISTING VAULT TABLES:\\n\" + (data.vault_tables.length ? data.vault_tables.join(\", \") : \"(none)\");\nreturn [{\n  json: {\n    llm_context: context,\n    user_request: data.user_request,\n    catalog: data.catalog,\n    existing_tables: currentTables,\n    fresh_marts: data.fresh_marts,\n    stale_marts: data.stale_marts,\n    vault_tables: data.vault_tables\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                300
+            ],
+            "id": "a6666666-6666-4666-8666-666666666666",
+            "name": "Build LLM Context"
+        },
+        {
+            "parameters": {
+                "promptType": "define",
+                "text": "={{ $json.llm_context }}",
+                "messages": {
+                    "messageValues": [
+                        {
+                            "message": "You are a Dispatcher for an inventory data integration system.\n\nYour job: given a user question and the current state of the database, decide the fastest path to answer it.\n\nROUTING RULES:\n- QUERY_ONLY: A fresh mart (<24h) already exists that answers the question. Just query it.\n- PARTIAL_BUILD: Some vault tables exist but the mart is missing, stale, or doesn't answer this specific question. Build only what's missing.\n- BUILD_ALL: No relevant vault tables exist. Build everything from scratch.\n\nSOURCE TABLES AVAILABLE:\n- erp: products, inventory_levels, locations, work_orders\n- procurement: vendors, purchase_orders, po_lines\n- wms: warehouses, stock_movements\n\nIMPORTANT:\n- source_tables_to_extract: list FULL references like \"erp.products\"\n- vault_tables_to_create: use DV2 naming: hub_<entity>, lnk_<entity1>_<entity2>, sat_<entity>_<aspect>\n- For QUERY_ONLY: set source_tables_to_extract and vault_tables_to_create to empty arrays\n- business_keys: source column names that uniquely identify entities\n- grain: what one row in the mart represents\n\nDATA VAULT PLANNING RULES:\n- Create one hub per distinct business entity (e.g., hub_product for products, hub_location for locations). NEVER combine multiple entities into a single composite hub.\n- Use links (lnk_) to represent relationships between hubs (e.g., lnk_product_location connects hub_product and hub_location).\n- Every satellite must have a parent hub or link in vault_tables_to_create or existing_tables_to_reuse.\n- Satellites that describe a single entity (e.g., sat_product_details) attach to that entity's hub (hub_product), NOT to a link.\n- Example for inventory questions: create hub_product, hub_location, lnk_product_location, sat_product_details (on hub_product), sat_inventory_levels (on lnk_product_location), sat_inventory_reorder_point (on hub_product).\n\nRespond ONLY with valid JSON (no markdown fences):\n{\"understood_request\":\"...\",\"routing_decision\":\"BUILD_ALL\"|\"QUERY_ONLY\"|\"PARTIAL_BUILD\",\"existing_tables_to_reuse\":[],\"source_tables_to_extract\":[],\"vault_tables_to_create\":[],\"mart_table_name\":\"mart_...\",\"business_keys\":[],\"grain\":\"...\",\"metrics\":[],\"final_query\":\"SELECT * FROM mart_...\"}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "type": "@n8n/n8n-nodes-langchain.chainLlm",
+            "typeVersion": 1.4,
+            "position": [
+                1320,
+                300
+            ],
+            "id": "a7777777-7777-4777-8777-777777777777",
+            "name": "Route Decision"
+        },
+        {
+            "parameters": {
+                "model": {
+                    "__rl": true,
+                    "mode": "id",
+                    "value": "claude-haiku-4-5-20251001"
+                },
+                "options": {
+                    "maxTokensToSample": 2048
+                }
+            },
+            "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+            "typeVersion": 1.3,
+            "position": [
+                1320,
+                520
+            ],
+            "id": "a8888888-8888-4888-8888-888888888888",
+            "name": "Anthropic Chat Model",
+            "credentials": {
+                "anthropicApi": {
+                    "id": "WZvvDOFtpiYtjRLz",
+                    "name": "Anthropic account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "const llmOutput = $input.first().json.text;\nlet plan;\ntry { plan = JSON.parse(llmOutput); } catch(e) {\n  const m = llmOutput.match(/```(?:json)?\\s*([\\s\\S]*?)```/);\n  if (m) plan = JSON.parse(m[1].trim());\n  else throw new Error('Cannot parse route: ' + llmOutput.substring(0,200));\n}\nconst ctx = $('Build LLM Context').first().json;\n\n// Enforce final_query to query the generated mart.\n// This prevents the router LLM from producing incorrect vault joins.\nconst martTable = plan.mart_table_name || plan.mart_used;\nif (martTable) plan.final_query = 'SELECT * FROM ' + martTable;\n\nreturn [{\n  json: {\n    ...plan,\n    catalog: ctx.catalog,\n    existing_tables: ctx.existing_tables,\n    vault_tables: ctx.vault_tables\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                300
+            ],
+            "id": "a9999999-9999-4999-8999-999999999999",
+            "name": "Parse Route"
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "route-check-cond-1",
+                            "leftValue": "={{ $json.routing_decision }}",
+                            "rightValue": "QUERY_ONLY",
+                            "operator": {
+                                "type": "string",
+                                "operation": "equals"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2.2,
+            "position": [
+                1760,
+                300
+            ],
+            "id": "b1111111-1111-4111-8111-111111111111",
+            "name": "Route Check"
+        },
+        {
+            "parameters": {
+                "jsCode": "const baseUrl = 'http://duckdb-service:8001/query';\nconst database = '/data/vault.duckdb';\nconst sql = String($json.final_query || '').trim();\nif (!sql) {\n  return [{\n    json: {\n      status: 'error',\n      output: { error: 'final_query is empty', columns: [], data: [], row_count: 0, sql: '' },\n    },\n  }];\n}\n\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: baseUrl,\n      headers: { 'content-type': 'application/json' },\n      body: { sql, database },\n      json: true,\n    });\n    return [{\n      json: {\n        status: 'success',\n        output: {\n          columns: res.columns || [],\n          data: res.rows || [],\n          row_count: res.row_count ?? (res.rows || []).length,\n          sql,\n          explanation: 'Executed via duckdb-service',\n        },\n      },\n    }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const d = e.response?.data ?? e.response?.body;\n    if (d && typeof d === 'object' && d.detail) detail = String(d.detail);\n    if (typeof d === 'string') {\n      try {\n        const p = JSON.parse(d);\n        if (p.detail) detail = String(p.detail);\n      } catch (_) {}\n    }\n    return [{\n      json: {\n        status: 'error',\n        output: { error: detail, columns: [], data: [], row_count: 0, sql },\n      },\n    }];\n  }\n})();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                100
+            ],
+            "id": "b2222222-2222-4222-8222-222222222222",
+            "name": "Query Mart"
+        },
+        {
+            "parameters": {
+                "jsCode": "const result = $input.first().json;\nconst plan = $('Parse Route').first().json;\nconst topStatus = result.status === 'error' ? 'error' : 'success';\nreturn [{\n  json: {\n    status: topStatus,\n    routing: 'QUERY_ONLY',\n    understood_request: plan.understood_request,\n    mart_used: plan.mart_table_name,\n    existing_tables_reused: plan.existing_tables_to_reuse || [],\n    output: result.output || result\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                100
+            ],
+            "id": "b3333333-3333-4333-8333-333333333333",
+            "name": "Format Query Response"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ $json }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                2420,
+                100
+            ],
+            "id": "b4444444-4444-4444-8444-444444444444",
+            "name": "Respond QUERY"
+        },
+        {
+            "parameters": {
+                "jsCode": "const plan = $json;\nconst tables = plan.source_tables_to_extract || [];\nconst statements = [\"ATTACH '/data/source.duckdb' AS source_db (READ_ONLY)\"];\nconst stagingTables = [];\nfor (const fullRef of tables) {\n  const parts = fullRef.split('.');\n  const stgName = 'stg_' + parts[0] + '_' + parts[1];\n  statements.push('DROP TABLE IF EXISTS ' + stgName);\n  statements.push('CREATE TABLE ' + stgName + ' AS SELECT * FROM source_db.' + fullRef);\n  stagingTables.push({name: stgName, original_source: fullRef});\n}\nstatements.push(\"DETACH source_db\");\nreturn [{\n  json: {\n    staging_statements: statements,\n    staging_tables: stagingTables,\n    plan: plan,\n    _ts_start: Date.now()\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                500
+            ],
+            "id": "b5555555-5555-4555-8555-555555555555",
+            "name": "Create Staging Tables"
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "http://duckdb-service:8001/execute-batch",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ {statements:$json.staging_statements, database:\"/data/vault.duckdb\"} }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                2200,
+                500
+            ],
+            "id": "b6666666-6666-4666-8666-666666666666",
+            "name": "Run Staging SQL"
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "http://duckdb-service:8001/query",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ (() => { const stg = $('Create Staging Tables').first().json.staging_tables || []; const emptySql = \"SELECT CAST(NULL AS VARCHAR) AS table_name, CAST(NULL AS VARCHAR) AS name, CAST(NULL AS VARCHAR) AS type WHERE FALSE\"; if (!stg.length) return { sql: emptySql, database: \"/data/vault.duckdb\" }; const sql = stg.map(t=>\"SELECT '\"+t.name+\"' AS table_name, column_name AS name, data_type AS type FROM information_schema.columns WHERE table_name='\"+t.name+\"' AND table_schema='main'\").join(' UNION ALL '); return { sql, database: \"/data/vault.duckdb\" }; })() }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                2420,
+                500
+            ],
+            "id": "b7777777-7777-4777-8777-777777777777",
+            "name": "Describe Staging"
+        },
+        {
+            "parameters": {
+                "jsCode": "const colData = $input.first().json;\nconst stgData = $('Create Staging Tables').first().json;\nconst plan = stgData.plan;\nconst colsByTable = {};\nfor (const r of (colData.rows || [])) {\n  if (!colsByTable[r.table_name]) colsByTable[r.table_name] = [];\n  colsByTable[r.table_name].push({name: r.name, type: r.type});\n}\nconst stagingTables = stgData.staging_tables.map(t => ({\n  name: t.name,\n  original_source: t.original_source,\n  columns: colsByTable[t.name] || []\n}));\nreturn [{\n  json: {\n    vault_request: {\n      staging_tables: stagingTables,\n      vault_tables_to_create: plan.vault_tables_to_create || [],\n      existing_vault_tables: plan.existing_tables_to_reuse || [],\n      business_keys: plan.business_keys || []\n    },\n    plan: plan\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                500
+            ],
+            "id": "b8888888-8888-4888-8888-888888888888",
+            "name": "Build Vault Request"
+        },
+        {
+            "parameters": {
+                "jsCode": "const body = $json.vault_request;\nconst _ts_start = Date.now();\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://localhost:5678/webhook/data-vault-agent',\n      headers: { 'content-type': 'application/json' },\n      body,\n      json: true,\n      timeout: 120000,\n    });\n\n    const result = (res && typeof res === 'object') ? res : { value: res };\n    result._ts_vault_ms = Date.now() - _ts_start;\n    return [{ json: result }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const raw = e.response?.data ?? e.response?.body;\n\n    if (raw && typeof raw === 'object' && raw.detail) detail = String(raw.detail);\n    else if (typeof raw === 'string' && raw.length) {\n      try {\n        const p = JSON.parse(raw);\n        if (p.detail) detail = String(p.detail);\n      } catch (_) {}\n      detail = raw.slice(0, 800);\n    }\n\n    return [{\n      json: {\n        status: 'error',\n        error: detail,\n        vault_tables: [],\n        _ts_vault_ms: Date.now() - _ts_start,\n      },\n    }];\n  }\n})();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2860,
+                500
+            ],
+            "id": "b9999999-9999-4999-8999-999999999999",
+            "name": "Call Data Vault Agent"
+        },
+        {
+            "parameters": {
+                "jsCode": "const vaultResult = $input.first().json;\nconst plan = $('Build Vault Request').first().json.plan;\nconst vaultTables = vaultResult.vault_tables || [];\nconst ddl = vaultTables.map(t => t.ddl);\nconst loads = vaultTables.map(t => t.load_sql);\nreturn [{\n  json: {\n    vault_statements: [...ddl, ...loads],\n    vault_tables: vaultTables,\n    plan: plan\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                3080,
+                500
+            ],
+            "id": "c1111111-1111-4111-8111-111111111111",
+            "name": "Collect Vault SQL"
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "http://duckdb-service:8001/execute-batch",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ {statements:$json.vault_statements, database:\"/data/vault.duckdb\"} }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                3300,
+                500
+            ],
+            "id": "c2222222-2222-4222-8222-222222222222",
+            "name": "Execute Vault SQL"
+        },
+        {
+            "parameters": {
+                "jsCode": "const prev = $('Collect Vault SQL').first().json;\nconst plan = prev.plan;\n\nreturn (async () => {\n  const createdVaultTables = prev.vault_tables || [];\n  const vaultByName = {};\n\n  // Prefer whatever we just created (Data Vault Agent provides full DDL).\n  for (const t of createdVaultTables) {\n    if (!t || !t.table_name) continue;\n    vaultByName[t.table_name] = {\n      table_name: t.table_name,\n      table_type: t.table_type,\n      ddl: t.ddl,\n    };\n  }\n\n  const existingNames = plan.existing_tables_to_reuse || [];\n  const database = '/data/vault.duckdb';\n  const baseUrl = 'http://duckdb-service:8001/query';\n\n  function tableTypeFromName(name) {\n    if (name.startsWith('hub_')) return 'HUB';\n    if (name.startsWith('lnk_')) return 'LINK';\n    if (name.startsWith('sat_')) return 'SATELLITE';\n    return 'UNKNOWN';\n  }\n\n  async function buildPseudoDDL(tableName) {\n    const safeName = String(tableName).replace(/'/g, \"''\");\n    const sql =\n      \"SELECT column_name, data_type FROM information_schema.columns \" +\n      \"WHERE table_schema = 'main' AND table_name = '\" + safeName + \"' \" +\n      'ORDER BY ordinal_position;';\n\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: baseUrl,\n      headers: { 'content-type': 'application/json' },\n      body: { sql, database },\n      json: true,\n    });\n\n    const cols = res.rows || [];\n    if (!cols.length) return null;\n\n    const colDefs = cols.map(c => c.column_name + ' ' + c.data_type).join(', ');\n    const ddl = 'CREATE TABLE ' + tableName + ' (' + colDefs + ')';\n\n    return {\n      table_name: tableName,\n      table_type: tableTypeFromName(tableName),\n      ddl,\n    };\n  }\n\n  const existingVaultTables = await Promise.all(\n    existingNames\n      .filter(n => n && !vaultByName[n])\n      .map(n => buildPseudoDDL.call(this, n))\n  );\n\n  for (const t of existingVaultTables) {\n    if (t && t.table_name && !vaultByName[t.table_name]) vaultByName[t.table_name] = t;\n  }\n\n  const allVault = Object.values(vaultByName);\n\n  return [\n    {\n      json: {\n        mart_request: {\n          vault_tables: allVault,\n          mart_table_name: plan.mart_table_name,\n          grain: plan.grain,\n          metrics: plan.metrics || [],\n          business_keys: plan.business_keys || [],\n        },\n        vault_tables: allVault,\n        plan: plan,\n      },\n    },\n  ];\n})();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                3520,
+                500
+            ],
+            "id": "c3333333-3333-4333-8333-333333333333",
+            "name": "Build Mart Request"
+        },
+        {
+            "parameters": {
+                "jsCode": "const body = $json.mart_request;\nconst _ts_start = Date.now();\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://localhost:5678/webhook/info-mart-agent',\n      headers: { 'content-type': 'application/json' },\n      body,\n      json: true,\n      timeout: 120000,\n    });\n\n    const result = (res && typeof res === 'object') ? res : { value: res };\n    result._ts_mart_ms = Date.now() - _ts_start;\n    return [{ json: result }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const raw = e.response?.data ?? e.response?.body;\n\n    if (raw && typeof raw === 'object' && raw.detail) detail = String(raw.detail);\n    else if (typeof raw === 'string' && raw.length) {\n      try {\n        const p = JSON.parse(raw);\n        if (p.detail) detail = String(p.detail);\n      } catch (_) {}\n      detail = raw.slice(0, 800);\n    }\n\n    return [{\n      json: {\n        status: 'error',\n        error: detail,\n        mart_table: {},\n        _ts_mart_ms: Date.now() - _ts_start,\n      },\n    }];\n  }\n})();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                3740,
+                500
+            ],
+            "id": "c4444444-4444-4444-8444-444444444444",
+            "name": "Call Info Mart Agent"
+        },
+        {
+            "parameters": {
+                "jsCode": "const martResult = $input.first().json;\nconst prev = $('Build Mart Request').first().json;\nconst plan = prev.plan;\nconst stgData = $('Create Staging Tables').first().json;\nconst mart = martResult.mart_table || {};\nconst stmts = [];\n// Drop the existing mart before recreating it so CREATE TABLE IF NOT EXISTS is not a no-op\nif (plan.mart_table_name) stmts.push('DROP TABLE IF EXISTS ' + plan.mart_table_name);\nif (mart.ddl) stmts.push(mart.ddl);\nif (mart.populate_sql) mart.populate_sql.split(';').map(s => s.trim()).filter(s => s).forEach(s => stmts.push(s));\nstgData.staging_tables.forEach(t => stmts.push('DROP TABLE IF EXISTS ' + t.name));\nreturn [{\n  json: {\n    mart_cleanup_statements: stmts,\n    mart_table: mart,\n    vault_tables: prev.vault_tables,\n    plan: plan\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                3960,
+                500
+            ],
+            "id": "c5555555-5555-4555-8555-555555555555",
+            "name": "Collect Mart + Cleanup"
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "http://duckdb-service:8001/execute-batch",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ {statements:$json.mart_cleanup_statements, database:\"/data/vault.duckdb\"} }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                4180,
+                500
+            ],
+            "id": "c6666666-6666-4666-8666-666666666666",
+            "name": "Execute Mart + Cleanup"
+        },
+        {
+            "parameters": {
+                "jsCode": "const body = (() => {\n  const d = $('Collect Mart + Cleanup').first().json;\n  return { vault_tables: d.vault_tables, mart_table: d.mart_table };\n})();\nconst _ts_start = Date.now();\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://localhost:5678/webhook/data-quality-agent',\n      headers: { 'content-type': 'application/json' },\n      body,\n      json: true,\n      timeout: 120000,\n    });\n    const result = res;\n    result._ts_dq_ms = Date.now() - _ts_start;\n    return [{ json: result }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const raw = e.response?.data ?? e.response?.body;\n    if (typeof raw === 'string' && raw.length) detail = raw.slice(0, 800);\n    else if (raw && typeof raw === 'object') detail = JSON.stringify(raw).slice(0, 800);\n    return [{\n      json: {\n        status: 'error',\n        checks_run: 0,\n        issues: [{\n          severity: 'error',\n          table: '_dq_webhook',\n          check: 'SYSTEM',\n          message: 'Data Quality Agent did not return JSON (sub-workflow error or non-JSON response): ' + detail,\n          count: 0,\n        }],\n        _ts_dq_ms: Date.now() - _ts_start,\n      },\n    }];\n  }\n})();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                5300,
+                500
+            ],
+            "id": "c7777777-7777-4777-8777-777777777777",
+            "name": "Call DQ Agent"
+        },
+        {
+            "parameters": {
+                "jsCode": "const dq = $input.first().json;\nconst plan = $('Collect Mart + Cleanup').first().json.plan;\nreturn [{\n  json: {\n    dq_status: dq.status || 'unknown',\n    dq_issues: dq.issues || [],\n    dq_checks_run: dq.checks_run || 0,\n    final_query: plan.final_query,\n    plan: plan\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                5520,
+                500
+            ],
+            "id": "c8888888-8888-4888-8888-888888888888",
+            "name": "Check DQ"
+        },
+        {
+            "parameters": {
+                "jsCode": "const baseUrl = 'http://duckdb-service:8001/query';\nconst database = '/data/vault.duckdb';\nconst sql = String($json.final_query || '').trim();\nif (!sql) {\n  return [{\n    json: {\n      status: 'error',\n      output: { error: 'final_query is empty', columns: [], data: [], row_count: 0, sql: '' },\n    },\n  }];\n}\n\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: baseUrl,\n      headers: { 'content-type': 'application/json' },\n      body: { sql, database },\n      json: true,\n    });\n    return [{\n      json: {\n        status: 'success',\n        output: {\n          columns: res.columns || [],\n          data: res.rows || [],\n          row_count: res.row_count ?? (res.rows || []).length,\n          sql,\n          explanation: 'Executed via duckdb-service',\n        },\n      },\n    }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const d = e.response?.data ?? e.response?.body;\n    if (d && typeof d === 'object' && d.detail) detail = String(d.detail);\n    if (typeof d === 'string') {\n      try {\n        const p = JSON.parse(d);\n        if (p.detail) detail = String(p.detail);\n      } catch (_) {}\n    }\n    return [{\n      json: {\n        status: 'error',\n        output: { error: detail, columns: [], data: [], row_count: 0, sql },\n      },\n    }];\n  }\n})();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                5960,
+                300
+            ],
+            "id": "c9999999-9999-4999-8999-999999999999",
+            "name": "Query Final Results"
+        },
+        {
+            "parameters": {
+                "jsCode": "const result = $input.first().json;\nconst dq = $('Check DQ').first().json;\nconst plan = dq.plan;\nconst stgData = $('Create Staging Tables').first().json;\nconst vaultData = $('Collect Vault SQL').first().json;\nconst martData = $('Collect Mart + Cleanup').first().json;\nconst dvAgent = $('Call Data Vault Agent').first().json;\nconst imAgent = $('Call Info Mart Agent').first().json;\nconst dqAgent = $('Call DQ Agent').first().json;\n\nconst topStatus = result.status === 'error' ? 'error' : 'success';\n\nconst timings = {\n  total_ms: Date.now() - (stgData._ts_start || Date.now()),\n  data_vault_agent_ms: dvAgent._ts_vault_ms || null,\n  info_mart_agent_ms: imAgent._ts_mart_ms || null,\n  dq_agent_ms: dqAgent._ts_dq_ms || null\n};\n\nconst generated_sql = {\n  vault: (vaultData.vault_tables || []).map(t => ({\n    table_name: t.table_name,\n    table_type: t.table_type,\n    ddl: t.ddl,\n    load_sql: t.load_sql\n  })),\n  mart: martData.mart_table ? {\n    table_name: martData.mart_table.table_name,\n    ddl: martData.mart_table.ddl,\n    populate_sql: martData.mart_table.populate_sql\n  } : null\n};\n\nreturn [{\n  json: {\n    status: topStatus,\n    routing: plan.routing_decision,\n    understood_request: plan.understood_request,\n    mart_created: plan.mart_table_name,\n    vault_tables_created: plan.vault_tables_to_create || [],\n    existing_tables_reused: plan.existing_tables_to_reuse || [],\n    source_tables_extracted: (stgData.staging_tables || []).map(t => t.original_source),\n    dq_status: dq.dq_status,\n    dq_checks_run: dq.dq_checks_run,\n    dq_issues: dq.dq_issues,\n    timings: timings,\n    generated_sql: generated_sql,\n    output: result.output || result\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                6180,
+                300
+            ],
+            "id": "d1111111-1111-4111-8111-111111111111",
+            "name": "Format Build Response"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ $json }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                6400,
+                300
+            ],
+            "id": "d2222222-2222-4222-8222-222222222222",
+            "name": "Respond BUILD"
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "dq-gate-cond-1",
+                            "leftValue": "={{ $json.dq_status }}",
+                            "rightValue": "pass",
+                            "operator": {
+                                "type": "string",
+                                "operation": "equals"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2.2,
+            "position": [
+                5740,
+                500
+            ],
+            "id": "d3333333-3333-4333-8333-333333333333",
+            "name": "DQ Gate"
+        },
+        {
+            "parameters": {
+                "jsCode": "const dq = $input.first().json;\nconst plan = dq.plan;\nconst stgData = $('Create Staging Tables').first().json;\nconst vaultData = $('Collect Vault SQL').first().json;\nconst martData = $('Collect Mart + Cleanup').first().json;\nconst dvAgent = $('Call Data Vault Agent').first().json;\nconst imAgent = $('Call Info Mart Agent').first().json;\nconst dqAgent = $('Call DQ Agent').first().json;\n\nconst timings = {\n  total_ms: Date.now() - (stgData._ts_start || Date.now()),\n  data_vault_agent_ms: dvAgent._ts_vault_ms || null,\n  info_mart_agent_ms: imAgent._ts_mart_ms || null,\n  dq_agent_ms: dqAgent._ts_dq_ms || null\n};\n\nconst generated_sql = {\n  vault: (vaultData.vault_tables || []).map(t => ({\n    table_name: t.table_name,\n    table_type: t.table_type,\n    ddl: t.ddl,\n    load_sql: t.load_sql\n  })),\n  mart: martData.mart_table ? {\n    table_name: martData.mart_table.table_name,\n    ddl: martData.mart_table.ddl,\n    populate_sql: martData.mart_table.populate_sql\n  } : null\n};\n\nreturn [{\n  json: {\n    status: 'error',\n    routing: plan.routing_decision,\n    understood_request: plan.understood_request,\n    mart_created: plan.mart_table_name,\n    vault_tables_created: plan.vault_tables_to_create || [],\n    existing_tables_reused: plan.existing_tables_to_reuse || [],\n    source_tables_extracted: (stgData.staging_tables || []).map(t => t.original_source),\n    dq_status: dq.dq_status,\n    dq_checks_run: dq.dq_checks_run,\n    dq_issues: dq.dq_issues,\n    timings: timings,\n    generated_sql: generated_sql,\n    output: {\n      error: 'Data quality checks failed \u2014 ' + (dq.dq_issues || []).length + ' issue(s) found. Vault tables that loaded successfully are preserved. Retry to regenerate failed tables.',\n      columns: [],\n      data: [],\n      row_count: 0,\n      sql: dq.final_query || ''\n    }\n  }\n}];"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                5960,
+                700
+            ],
+            "id": "d5555555-5555-4555-8555-555555555555",
+            "name": "Format DQ Fail Response"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ $json }}",
+                "options": {}
+            },
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                6180,
+                700
+            ],
+            "id": "d4444444-4444-4444-8444-444444444444",
+            "name": "Respond DQ FAIL"
+        },
+        {
+            "parameters": {
+                "jsCode": "const prev = $('Collect Mart + Cleanup').first().json;\nconst plan = prev.plan;\nconst martName = plan.mart_table_name;\nconst retryCount = prev.retry_count || 0;\n\nreturn (async () => {\n  const database = '/data/vault.duckdb';\n  const baseUrl = 'http://duckdb-service:8001/query';\n  \n  // Check 1: row count\n  const countRes = await this.helpers.httpRequest({\n    method: 'POST', url: baseUrl,\n    headers: { 'content-type': 'application/json' },\n    body: { sql: 'SELECT COUNT(*) AS cnt FROM ' + martName, database },\n    json: true,\n  });\n  const rowCount = countRes.rows?.[0]?.cnt || 0;\n  \n  if (rowCount === 0) {\n    return [{ json: { valid: false, retry_count: retryCount, error: 'Mart table is empty (0 rows)', plan, mart_table: prev.mart_table, vault_tables: prev.vault_tables } }];\n  }\n  \n  // Check 2: sample rows for NULL dimension columns\n  const sampleRes = await this.helpers.httpRequest({\n    method: 'POST', url: baseUrl,\n    headers: { 'content-type': 'application/json' },\n    body: { sql: 'SELECT * FROM ' + martName + ' LIMIT 10', database },\n    json: true,\n  });\n  \n  const rows = sampleRes.rows || [];\n  const columns = sampleRes.columns || [];\n  \n  // Find columns where ALL sampled values are null (excluding mart_insert_dts and numeric metrics)\n  const nullCols = [];\n  for (const col of columns) {\n    if (col === 'mart_insert_dts') continue;\n    const allNull = rows.every(r => r[col] === null || r[col] === undefined);\n    if (allNull && rows.length > 0) nullCols.push(col);\n  }\n  \n  if (nullCols.length > 0) {\n    return [{ json: { \n      valid: false, \n      retry_count: retryCount,\n      error: 'Mart has all-NULL columns: ' + nullCols.join(', ') + '. The JOIN to populate these columns likely used mismatched keys. Ensure all JOINs between hub, satellite, and link tables use matching hash keys (_hk columns).',\n      null_columns: nullCols,\n      plan, \n      mart_table: prev.mart_table, \n      vault_tables: prev.vault_tables \n    } }];\n  }\n  \n  return [{ json: { valid: true, retry_count: retryCount, plan, mart_table: prev.mart_table, vault_tables: prev.vault_tables } }];\n})();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                4400,
+                500
+            ],
+            "id": "e1111111-1111-4111-8111-111111111111",
+            "name": "Validate Mart"
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "mart-valid-cond-1",
+                            "leftValue": "={{ $json.valid }}",
+                            "rightValue": true,
+                            "operator": {
+                                "type": "boolean",
+                                "operation": "true"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2.2,
+            "position": [
+                4620,
+                500
+            ],
+            "id": "e2222222-2222-4222-8222-222222222222",
+            "name": "Mart Valid?"
+        },
+        {
+            "parameters": {
+                "jsCode": "const prev = $input.first().json;\nconst retryCount = prev.retry_count || 0;\n\nreturn (async () => {\n  if (retryCount >= 1) {\n    // Already retried once, give up and let DQ Agent handle it\n    return [{ json: { valid: true, skip_retry: true, plan: prev.plan, mart_table: prev.mart_table, vault_tables: prev.vault_tables } }];\n  }\n  \n  // Build enhanced mart request with error feedback\n  const martRequest = {\n    vault_tables: prev.vault_tables,\n    mart_table_name: prev.plan.mart_table_name,\n    grain: prev.plan.grain,\n    metrics: prev.plan.metrics || [],\n    business_keys: prev.plan.business_keys || [],\n    previous_error: prev.error,\n    retry_instructions: 'The previous mart SQL produced NULL values in columns: ' + (prev.null_columns || []).join(', ') + '. This is because the JOINs used mismatched keys. IMPORTANT RULES FOR JOINS: (1) Join hub to satellite using the hub hash key (e.g. hub_product.product_hk = sat_product_details.product_hk). (2) Join hub to link using the hub hash key (e.g. hub_product.product_hk = lnk_product_location.product_hk). (3) Join link to satellite using the link hash key (e.g. lnk_product_location.product_location_hk = sat_inventory_levels.product_location_hk). (4) Always filter current satellite records with WHERE load_end_dts IS NULL. Please regenerate the populate SQL with correct JOINs.'\n  };\n  \n  // Call Info Mart Agent again\n  const martRes = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'http://localhost:5678/webhook/info-mart-agent',\n    headers: { 'content-type': 'application/json' },\n    body: martRequest,\n    json: true,\n    timeout: 120000,\n  });\n  \n  const mart = martRes.mart_table || {};\n  const stmts = [];\n  \n  // Drop and rebuild\n  stmts.push('DROP TABLE IF EXISTS ' + prev.plan.mart_table_name);\n  if (mart.ddl) stmts.push(mart.ddl);\n  if (mart.populate_sql) mart.populate_sql.split(';').map(s => s.trim()).filter(s => s).forEach(s => stmts.push(s));\n  \n  // Execute the new mart SQL\n  const execRes = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'http://duckdb-service:8001/execute-batch',\n    headers: { 'content-type': 'application/json' },\n    body: { statements: stmts, database: '/data/vault.duckdb' },\n    json: true,\n    timeout: 60000,\n  });\n  \n  // Now validate again\n  const database = '/data/vault.duckdb';\n  const baseUrl = 'http://duckdb-service:8001/query';\n  const martName = prev.plan.mart_table_name;\n  \n  const countRes = await this.helpers.httpRequest({\n    method: 'POST', url: baseUrl,\n    headers: { 'content-type': 'application/json' },\n    body: { sql: 'SELECT COUNT(*) AS cnt FROM ' + martName, database },\n    json: true,\n  });\n  const rowCount = countRes.rows?.[0]?.cnt || 0;\n  \n  let nullCols = [];\n  if (rowCount > 0) {\n    const sampleRes = await this.helpers.httpRequest({\n      method: 'POST', url: baseUrl,\n      headers: { 'content-type': 'application/json' },\n      body: { sql: 'SELECT * FROM ' + martName + ' LIMIT 10', database },\n      json: true,\n    });\n    const rows = sampleRes.rows || [];\n    const columns = sampleRes.columns || [];\n    for (const col of columns) {\n      if (col === 'mart_insert_dts') continue;\n      const allNull = rows.every(r => r[col] === null || r[col] === undefined);\n      if (allNull && rows.length > 0) nullCols.push(col);\n    }\n  }\n  \n  const valid = rowCount > 0 && nullCols.length === 0;\n  \n  return [{ json: { \n    valid, \n    retry_count: retryCount + 1,\n    retried: true,\n    error: valid ? null : (rowCount === 0 ? 'Still empty after retry' : 'Still has NULL columns after retry: ' + nullCols.join(', ')),\n    null_columns: nullCols,\n    plan: prev.plan, \n    mart_table: mart,\n    vault_tables: prev.vault_tables \n  } }];\n})();"
+            },
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                4620,
+                800
+            ],
+            "id": "e3333333-3333-4333-8333-333333333333",
+            "name": "Retry Mart"
+        }
+    ],
+    "connections": {
+        "Webhook": {
+            "main": [
+                [
+                    {
+                        "node": "Read Source Catalog",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Read Source Catalog": {
+            "main": [
+                [
+                    {
+                        "node": "Inspect Tables",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Inspect Tables": {
+            "main": [
+                [
+                    {
+                        "node": "Classify Tables",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Classify Tables": {
+            "main": [
+                [
+                    {
+                        "node": "Cleanup Stale Marts",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Cleanup Stale Marts": {
+            "main": [
+                [
+                    {
+                        "node": "Build LLM Context",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build LLM Context": {
+            "main": [
+                [
+                    {
+                        "node": "Route Decision",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Route Decision": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Route",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Anthropic Chat Model": {
+            "ai_languageModel": [
+                [
+                    {
+                        "node": "Route Decision",
+                        "type": "ai_languageModel",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Route": {
+            "main": [
+                [
+                    {
+                        "node": "Route Check",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Route Check": {
+            "main": [
+                [
+                    {
+                        "node": "Query Mart",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Create Staging Tables",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Query Mart": {
+            "main": [
+                [
+                    {
+                        "node": "Format Query Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format Query Response": {
+            "main": [
+                [
+                    {
+                        "node": "Respond QUERY",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Create Staging Tables": {
+            "main": [
+                [
+                    {
+                        "node": "Run Staging SQL",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Run Staging SQL": {
+            "main": [
+                [
+                    {
+                        "node": "Describe Staging",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Describe Staging": {
+            "main": [
+                [
+                    {
+                        "node": "Build Vault Request",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build Vault Request": {
+            "main": [
+                [
+                    {
+                        "node": "Call Data Vault Agent",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Call Data Vault Agent": {
+            "main": [
+                [
+                    {
+                        "node": "Collect Vault SQL",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Collect Vault SQL": {
+            "main": [
+                [
+                    {
+                        "node": "Execute Vault SQL",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Execute Vault SQL": {
+            "main": [
+                [
+                    {
+                        "node": "Build Mart Request",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build Mart Request": {
+            "main": [
+                [
+                    {
+                        "node": "Call Info Mart Agent",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Call Info Mart Agent": {
+            "main": [
+                [
+                    {
+                        "node": "Collect Mart + Cleanup",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Collect Mart + Cleanup": {
+            "main": [
+                [
+                    {
+                        "node": "Execute Mart + Cleanup",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Execute Mart + Cleanup": {
+            "main": [
+                [
+                    {
+                        "node": "Validate Mart",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Call DQ Agent": {
+            "main": [
+                [
+                    {
+                        "node": "Check DQ",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Check DQ": {
+            "main": [
+                [
+                    {
+                        "node": "DQ Gate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "DQ Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Query Final Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Format DQ Fail Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format DQ Fail Response": {
+            "main": [
+                [
+                    {
+                        "node": "Respond DQ FAIL",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Query Final Results": {
+            "main": [
+                [
+                    {
+                        "node": "Format Build Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format Build Response": {
+            "main": [
+                [
+                    {
+                        "node": "Respond BUILD",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Validate Mart": {
+            "main": [
+                [
+                    {
+                        "node": "Mart Valid?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Mart Valid?": {
+            "main": [
+                [
+                    {
+                        "node": "Call DQ Agent",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Retry Mart",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Retry Mart": {
+            "main": [
+                [
+                    {
+                        "node": "Call DQ Agent",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1",
+        "callerPolicy": "workflowsFromSameOwner",
+        "availableInMCP": false
+    },
+    "staticData": null,
+    "meta": null,
+    "pinData": {},
+    "versionId": "0533a37f-353a-4d0b-a10a-5008909f4cd9",
+    "activeVersionId": "0533a37f-353a-4d0b-a10a-5008909f4cd9",
+    "versionCounter": 149,
+    "triggerCount": 1,
+    "shared": [
+        {
+            "updatedAt": "2026-03-24T18:51:52.648Z",
+            "createdAt": "2026-03-24T18:51:52.648Z",
+            "role": "workflow:owner",
+            "workflowId": "EPobOCC4V3tBomcw",
+            "projectId": "eubhCi2tBHtd3cvz",
+            "project": {
+                "updatedAt": "2026-03-15T03:56:59.837Z",
+                "createdAt": "2026-02-23T22:46:53.069Z",
+                "id": "eubhCi2tBHtd3cvz",
+                "name": "Thinh Pham <hoangthinh.pham@gmail.com>",
+                "type": "personal",
+                "icon": null,
+                "description": null,
+                "creatorId": "4d308f1a-e8cd-468b-bae5-ac7bc92538cc"
+            }
+        }
+    ],
+    "tags": [],
+    "activeVersion": {
+        "updatedAt": "2026-03-27T04:34:41.995Z",
+        "createdAt": "2026-03-27T04:34:41.995Z",
+        "versionId": "0533a37f-353a-4d0b-a10a-5008909f4cd9",
+        "workflowId": "EPobOCC4V3tBomcw",
+        "nodes": [
+            {
+                "parameters": {
+                    "httpMethod": "POST",
+                    "path": "dispatcher",
+                    "responseMode": "responseNode",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.webhook",
+                "typeVersion": 2.1,
+                "position": [
+                    0,
+                    300
+                ],
+                "id": "a1111111-1111-4111-8111-111111111111",
+                "name": "Webhook",
+                "webhookId": "disp-wh-1"
+            },
+            {
+                "parameters": {
+                    "fileSelector": "/data/metadata/source_catalog.json",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.readWriteFile",
+                "typeVersion": 1.1,
+                "position": [
+                    220,
+                    300
+                ],
+                "id": "a2222222-2222-4222-8222-222222222222",
+                "name": "Read Source Catalog"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const baseUrl = 'http://duckdb-service:8001/query';\nconst database = '/data/vault.duckdb';\nconst listSql =\n  \"SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' ORDER BY table_name\";\n\nreturn (async () => {\n  const listRes = await this.helpers.httpRequest({\n    method: 'POST',\n    url: baseUrl,\n    headers: { 'content-type': 'application/json' },\n    body: { sql: listSql, database },\n    json: true,\n  });\n\n  const rows = listRes.rows || [];\n  const byName = {};\n  for (const r of rows) {\n    const name = r.table_name;\n    if (!name) continue;\n    byName[name] = { table_name: name, max_insert_dts: null };\n  }\n  const marts = rows.filter((r) => String(r.table_name || '').startsWith('mart_'));\n  try {\n    if (marts.length > 0) {\n      const unionSql = marts\n        .map((r) => {\n          const n = String(r.table_name);\n          const safeIdent = n.replace(/\"/g, '\"\"');\n          return (\n            \"SELECT '\" +\n            n.replace(/'/g, \"''\") +\n            \"' AS table_name, MAX(mart_insert_dts) AS max_insert_dts FROM \\\"\" +\n            safeIdent +\n            '\"'\n          );\n        })\n        .join(' UNION ALL ');\n      const martRes = await this.helpers.httpRequest({\n        method: 'POST',\n        url: baseUrl,\n        headers: { 'content-type': 'application/json' },\n        body: { sql: unionSql, database },\n        json: true,\n      });\n      for (const r of martRes.rows || []) {\n        const tn = r.table_name;\n        if (Object.prototype.hasOwnProperty.call(byName, tn)) {\n          byName[tn].max_insert_dts = r.max_insert_dts;\n        }\n      }\n    }\n  } catch (e) {\n    // mart_insert_dts may be missing or table not readable; leave max_insert_dts null\n  }\n\n  return [{ json: { output: { data: Object.values(byName) } } }];\n})();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    440,
+                    300
+                ],
+                "id": "a3333333-3333-4333-8333-333333333333",
+                "name": "Inspect Tables"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const inspectResult = $input.first().json;\nconst webhookData = $('Webhook').first().json.body;\nconst catalogFile = $('Read Source Catalog').first().json;\nlet catalog;\ntry {\n  if (catalogFile.data) catalog = JSON.parse(Buffer.from(catalogFile.data, 'base64').toString('utf-8'));\n  else catalog = catalogFile;\n} catch(e) { catalog = catalogFile; }\nconst tables = inspectResult.output ? (inspectResult.output.data || []) : [];\nconst now = new Date();\nconst H24 = 24*60*60*1000;\nconst H48 = 48*60*60*1000;\nconst existingTables = [];\nconst staleMarts = [];\nconst expiredMarts = [];\nconst freshMarts = [];\nfor (const t of tables) {\n  const name = t.table_name;\n  existingTables.push(name);\n  if (name.startsWith('mart_')) {\n    const age = t.max_insert_dts && t.max_insert_dts !== 'NaT'\n      ? (now - new Date(t.max_insert_dts))\n      : Infinity;\n    if (isNaN(age) || age > H48) expiredMarts.push(name);\n    else if (age > H24) staleMarts.push(name);\n    else freshMarts.push(name);\n  }\n}\nreturn [{\n  json: {\n    user_request: webhookData.user_request,\n    catalog,\n    existing_tables: existingTables,\n    fresh_marts: freshMarts,\n    stale_marts: staleMarts,\n    expired_marts: expiredMarts,\n    vault_tables: existingTables.filter(t => t.startsWith('hub_') || t.startsWith('lnk_') || t.startsWith('sat_'))\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    660,
+                    300
+                ],
+                "id": "a4444444-4444-4444-8444-444444444444",
+                "name": "Classify Tables"
+            },
+            {
+                "parameters": {
+                    "method": "POST",
+                    "url": "http://duckdb-service:8001/execute-batch",
+                    "sendBody": true,
+                    "specifyBody": "json",
+                    "jsonBody": "={{ (() => { const exp=$json.expired_marts||[]; if(!exp.length) return {statements:[\"SELECT 1\"],database:\"/data/vault.duckdb\"}; return {statements:exp.map(t=>\"DROP TABLE IF EXISTS \"+t),database:\"/data/vault.duckdb\"}; })() }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [
+                    880,
+                    300
+                ],
+                "id": "a5555555-5555-4555-8555-555555555555",
+                "name": "Cleanup Stale Marts"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const data = $('Classify Tables').first().json;\nconst currentTables = data.existing_tables.filter(t => !data.expired_marts.includes(t));\nconst context = \"USER QUESTION: \" + data.user_request + \"\\n\\nSOURCE CATALOG:\\n\" + JSON.stringify(data.catalog, null, 2) + \"\\n\\nEXISTING TABLES IN VAULT:\\n\" + (currentTables.length ? currentTables.join(\", \") : \"(none)\") + \"\\n\\nFRESH MARTS (<24h):\\n\" + (data.fresh_marts.length ? data.fresh_marts.join(\", \") : \"(none)\") + \"\\n\\nSTALE MARTS (24-48h):\\n\" + (data.stale_marts.length ? data.stale_marts.join(\", \") : \"(none)\") + \"\\n\\nEXISTING VAULT TABLES:\\n\" + (data.vault_tables.length ? data.vault_tables.join(\", \") : \"(none)\");\nreturn [{\n  json: {\n    llm_context: context,\n    user_request: data.user_request,\n    catalog: data.catalog,\n    existing_tables: currentTables,\n    fresh_marts: data.fresh_marts,\n    stale_marts: data.stale_marts,\n    vault_tables: data.vault_tables\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    1100,
+                    300
+                ],
+                "id": "a6666666-6666-4666-8666-666666666666",
+                "name": "Build LLM Context"
+            },
+            {
+                "parameters": {
+                    "promptType": "define",
+                    "text": "={{ $json.llm_context }}",
+                    "messages": {
+                        "messageValues": [
+                            {
+                                "message": "You are a Dispatcher for an inventory data integration system.\n\nYour job: given a user question and the current state of the database, decide the fastest path to answer it.\n\nROUTING RULES:\n- QUERY_ONLY: A fresh mart (<24h) already exists that answers the question. Just query it.\n- PARTIAL_BUILD: Some vault tables exist but the mart is missing, stale, or doesn't answer this specific question. Build only what's missing.\n- BUILD_ALL: No relevant vault tables exist. Build everything from scratch.\n\nSOURCE TABLES AVAILABLE:\n- erp: products, inventory_levels, locations, work_orders\n- procurement: vendors, purchase_orders, po_lines\n- wms: warehouses, stock_movements\n\nIMPORTANT:\n- source_tables_to_extract: list FULL references like \"erp.products\"\n- vault_tables_to_create: use DV2 naming: hub_<entity>, lnk_<entity1>_<entity2>, sat_<entity>_<aspect>\n- For QUERY_ONLY: set source_tables_to_extract and vault_tables_to_create to empty arrays\n- business_keys: source column names that uniquely identify entities\n- grain: what one row in the mart represents\n\nDATA VAULT PLANNING RULES:\n- Create one hub per distinct business entity (e.g., hub_product for products, hub_location for locations). NEVER combine multiple entities into a single composite hub.\n- Use links (lnk_) to represent relationships between hubs (e.g., lnk_product_location connects hub_product and hub_location).\n- Every satellite must have a parent hub or link in vault_tables_to_create or existing_tables_to_reuse.\n- Satellites that describe a single entity (e.g., sat_product_details) attach to that entity's hub (hub_product), NOT to a link.\n- Example for inventory questions: create hub_product, hub_location, lnk_product_location, sat_product_details (on hub_product), sat_inventory_levels (on lnk_product_location), sat_inventory_reorder_point (on hub_product).\n\nRespond ONLY with valid JSON (no markdown fences):\n{\"understood_request\":\"...\",\"routing_decision\":\"BUILD_ALL\"|\"QUERY_ONLY\"|\"PARTIAL_BUILD\",\"existing_tables_to_reuse\":[],\"source_tables_to_extract\":[],\"vault_tables_to_create\":[],\"mart_table_name\":\"mart_...\",\"business_keys\":[],\"grain\":\"...\",\"metrics\":[],\"final_query\":\"SELECT * FROM mart_...\"}"
+                            }
+                        ]
+                    },
+                    "options": {}
+                },
+                "type": "@n8n/n8n-nodes-langchain.chainLlm",
+                "typeVersion": 1.4,
+                "position": [
+                    1320,
+                    300
+                ],
+                "id": "a7777777-7777-4777-8777-777777777777",
+                "name": "Route Decision"
+            },
+            {
+                "parameters": {
+                    "model": {
+                        "__rl": true,
+                        "mode": "id",
+                        "value": "claude-haiku-4-5-20251001"
+                    },
+                    "options": {
+                        "maxTokensToSample": 2048
+                    }
+                },
+                "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+                "typeVersion": 1.3,
+                "position": [
+                    1320,
+                    520
+                ],
+                "id": "a8888888-8888-4888-8888-888888888888",
+                "name": "Anthropic Chat Model",
+                "credentials": {
+                    "anthropicApi": {
+                        "id": "WZvvDOFtpiYtjRLz",
+                        "name": "Anthropic account"
+                    }
+                }
+            },
+            {
+                "parameters": {
+                    "jsCode": "const llmOutput = $input.first().json.text;\nlet plan;\ntry { plan = JSON.parse(llmOutput); } catch(e) {\n  const m = llmOutput.match(/```(?:json)?\\s*([\\s\\S]*?)```/);\n  if (m) plan = JSON.parse(m[1].trim());\n  else throw new Error('Cannot parse route: ' + llmOutput.substring(0,200));\n}\nconst ctx = $('Build LLM Context').first().json;\n\n// Enforce final_query to query the generated mart.\n// This prevents the router LLM from producing incorrect vault joins.\nconst martTable = plan.mart_table_name || plan.mart_used;\nif (martTable) plan.final_query = 'SELECT * FROM ' + martTable;\n\nreturn [{\n  json: {\n    ...plan,\n    catalog: ctx.catalog,\n    existing_tables: ctx.existing_tables,\n    vault_tables: ctx.vault_tables\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    1540,
+                    300
+                ],
+                "id": "a9999999-9999-4999-8999-999999999999",
+                "name": "Parse Route"
+            },
+            {
+                "parameters": {
+                    "conditions": {
+                        "options": {
+                            "caseSensitive": true,
+                            "leftValue": "",
+                            "typeValidation": "strict"
+                        },
+                        "conditions": [
+                            {
+                                "id": "route-check-cond-1",
+                                "leftValue": "={{ $json.routing_decision }}",
+                                "rightValue": "QUERY_ONLY",
+                                "operator": {
+                                    "type": "string",
+                                    "operation": "equals"
+                                }
+                            }
+                        ],
+                        "combinator": "and"
+                    },
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 2.2,
+                "position": [
+                    1760,
+                    300
+                ],
+                "id": "b1111111-1111-4111-8111-111111111111",
+                "name": "Route Check"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const baseUrl = 'http://duckdb-service:8001/query';\nconst database = '/data/vault.duckdb';\nconst sql = String($json.final_query || '').trim();\nif (!sql) {\n  return [{\n    json: {\n      status: 'error',\n      output: { error: 'final_query is empty', columns: [], data: [], row_count: 0, sql: '' },\n    },\n  }];\n}\n\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: baseUrl,\n      headers: { 'content-type': 'application/json' },\n      body: { sql, database },\n      json: true,\n    });\n    return [{\n      json: {\n        status: 'success',\n        output: {\n          columns: res.columns || [],\n          data: res.rows || [],\n          row_count: res.row_count ?? (res.rows || []).length,\n          sql,\n          explanation: 'Executed via duckdb-service',\n        },\n      },\n    }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const d = e.response?.data ?? e.response?.body;\n    if (d && typeof d === 'object' && d.detail) detail = String(d.detail);\n    if (typeof d === 'string') {\n      try {\n        const p = JSON.parse(d);\n        if (p.detail) detail = String(p.detail);\n      } catch (_) {}\n    }\n    return [{\n      json: {\n        status: 'error',\n        output: { error: detail, columns: [], data: [], row_count: 0, sql },\n      },\n    }];\n  }\n})();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    1980,
+                    100
+                ],
+                "id": "b2222222-2222-4222-8222-222222222222",
+                "name": "Query Mart"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const result = $input.first().json;\nconst plan = $('Parse Route').first().json;\nconst topStatus = result.status === 'error' ? 'error' : 'success';\nreturn [{\n  json: {\n    status: topStatus,\n    routing: 'QUERY_ONLY',\n    understood_request: plan.understood_request,\n    mart_used: plan.mart_table_name,\n    existing_tables_reused: plan.existing_tables_to_reuse || [],\n    output: result.output || result\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    2200,
+                    100
+                ],
+                "id": "b3333333-3333-4333-8333-333333333333",
+                "name": "Format Query Response"
+            },
+            {
+                "parameters": {
+                    "respondWith": "json",
+                    "responseBody": "={{ $json }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.respondToWebhook",
+                "typeVersion": 1.1,
+                "position": [
+                    2420,
+                    100
+                ],
+                "id": "b4444444-4444-4444-8444-444444444444",
+                "name": "Respond QUERY"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const plan = $json;\nconst tables = plan.source_tables_to_extract || [];\nconst statements = [\"ATTACH '/data/source.duckdb' AS source_db (READ_ONLY)\"];\nconst stagingTables = [];\nfor (const fullRef of tables) {\n  const parts = fullRef.split('.');\n  const stgName = 'stg_' + parts[0] + '_' + parts[1];\n  statements.push('DROP TABLE IF EXISTS ' + stgName);\n  statements.push('CREATE TABLE ' + stgName + ' AS SELECT * FROM source_db.' + fullRef);\n  stagingTables.push({name: stgName, original_source: fullRef});\n}\nstatements.push(\"DETACH source_db\");\nreturn [{\n  json: {\n    staging_statements: statements,\n    staging_tables: stagingTables,\n    plan: plan,\n    _ts_start: Date.now()\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    1980,
+                    500
+                ],
+                "id": "b5555555-5555-4555-8555-555555555555",
+                "name": "Create Staging Tables"
+            },
+            {
+                "parameters": {
+                    "method": "POST",
+                    "url": "http://duckdb-service:8001/execute-batch",
+                    "sendBody": true,
+                    "specifyBody": "json",
+                    "jsonBody": "={{ {statements:$json.staging_statements, database:\"/data/vault.duckdb\"} }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [
+                    2200,
+                    500
+                ],
+                "id": "b6666666-6666-4666-8666-666666666666",
+                "name": "Run Staging SQL"
+            },
+            {
+                "parameters": {
+                    "method": "POST",
+                    "url": "http://duckdb-service:8001/query",
+                    "sendBody": true,
+                    "specifyBody": "json",
+                    "jsonBody": "={{ (() => { const stg = $('Create Staging Tables').first().json.staging_tables || []; const emptySql = \"SELECT CAST(NULL AS VARCHAR) AS table_name, CAST(NULL AS VARCHAR) AS name, CAST(NULL AS VARCHAR) AS type WHERE FALSE\"; if (!stg.length) return { sql: emptySql, database: \"/data/vault.duckdb\" }; const sql = stg.map(t=>\"SELECT '\"+t.name+\"' AS table_name, column_name AS name, data_type AS type FROM information_schema.columns WHERE table_name='\"+t.name+\"' AND table_schema='main'\").join(' UNION ALL '); return { sql, database: \"/data/vault.duckdb\" }; })() }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [
+                    2420,
+                    500
+                ],
+                "id": "b7777777-7777-4777-8777-777777777777",
+                "name": "Describe Staging"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const colData = $input.first().json;\nconst stgData = $('Create Staging Tables').first().json;\nconst plan = stgData.plan;\nconst colsByTable = {};\nfor (const r of (colData.rows || [])) {\n  if (!colsByTable[r.table_name]) colsByTable[r.table_name] = [];\n  colsByTable[r.table_name].push({name: r.name, type: r.type});\n}\nconst stagingTables = stgData.staging_tables.map(t => ({\n  name: t.name,\n  original_source: t.original_source,\n  columns: colsByTable[t.name] || []\n}));\nreturn [{\n  json: {\n    vault_request: {\n      staging_tables: stagingTables,\n      vault_tables_to_create: plan.vault_tables_to_create || [],\n      existing_vault_tables: plan.existing_tables_to_reuse || [],\n      business_keys: plan.business_keys || []\n    },\n    plan: plan\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    2640,
+                    500
+                ],
+                "id": "b8888888-8888-4888-8888-888888888888",
+                "name": "Build Vault Request"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const body = $json.vault_request;\nconst _ts_start = Date.now();\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://localhost:5678/webhook/data-vault-agent',\n      headers: { 'content-type': 'application/json' },\n      body,\n      json: true,\n      timeout: 120000,\n    });\n\n    const result = (res && typeof res === 'object') ? res : { value: res };\n    result._ts_vault_ms = Date.now() - _ts_start;\n    return [{ json: result }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const raw = e.response?.data ?? e.response?.body;\n\n    if (raw && typeof raw === 'object' && raw.detail) detail = String(raw.detail);\n    else if (typeof raw === 'string' && raw.length) {\n      try {\n        const p = JSON.parse(raw);\n        if (p.detail) detail = String(p.detail);\n      } catch (_) {}\n      detail = raw.slice(0, 800);\n    }\n\n    return [{\n      json: {\n        status: 'error',\n        error: detail,\n        vault_tables: [],\n        _ts_vault_ms: Date.now() - _ts_start,\n      },\n    }];\n  }\n})();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    2860,
+                    500
+                ],
+                "id": "b9999999-9999-4999-8999-999999999999",
+                "name": "Call Data Vault Agent"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const vaultResult = $input.first().json;\nconst plan = $('Build Vault Request').first().json.plan;\nconst vaultTables = vaultResult.vault_tables || [];\nconst ddl = vaultTables.map(t => t.ddl);\nconst loads = vaultTables.map(t => t.load_sql);\nreturn [{\n  json: {\n    vault_statements: [...ddl, ...loads],\n    vault_tables: vaultTables,\n    plan: plan\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    3080,
+                    500
+                ],
+                "id": "c1111111-1111-4111-8111-111111111111",
+                "name": "Collect Vault SQL"
+            },
+            {
+                "parameters": {
+                    "method": "POST",
+                    "url": "http://duckdb-service:8001/execute-batch",
+                    "sendBody": true,
+                    "specifyBody": "json",
+                    "jsonBody": "={{ {statements:$json.vault_statements, database:\"/data/vault.duckdb\"} }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [
+                    3300,
+                    500
+                ],
+                "id": "c2222222-2222-4222-8222-222222222222",
+                "name": "Execute Vault SQL"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const prev = $('Collect Vault SQL').first().json;\nconst plan = prev.plan;\n\nreturn (async () => {\n  const createdVaultTables = prev.vault_tables || [];\n  const vaultByName = {};\n\n  // Prefer whatever we just created (Data Vault Agent provides full DDL).\n  for (const t of createdVaultTables) {\n    if (!t || !t.table_name) continue;\n    vaultByName[t.table_name] = {\n      table_name: t.table_name,\n      table_type: t.table_type,\n      ddl: t.ddl,\n    };\n  }\n\n  const existingNames = plan.existing_tables_to_reuse || [];\n  const database = '/data/vault.duckdb';\n  const baseUrl = 'http://duckdb-service:8001/query';\n\n  function tableTypeFromName(name) {\n    if (name.startsWith('hub_')) return 'HUB';\n    if (name.startsWith('lnk_')) return 'LINK';\n    if (name.startsWith('sat_')) return 'SATELLITE';\n    return 'UNKNOWN';\n  }\n\n  async function buildPseudoDDL(tableName) {\n    const safeName = String(tableName).replace(/'/g, \"''\");\n    const sql =\n      \"SELECT column_name, data_type FROM information_schema.columns \" +\n      \"WHERE table_schema = 'main' AND table_name = '\" + safeName + \"' \" +\n      'ORDER BY ordinal_position;';\n\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: baseUrl,\n      headers: { 'content-type': 'application/json' },\n      body: { sql, database },\n      json: true,\n    });\n\n    const cols = res.rows || [];\n    if (!cols.length) return null;\n\n    const colDefs = cols.map(c => c.column_name + ' ' + c.data_type).join(', ');\n    const ddl = 'CREATE TABLE ' + tableName + ' (' + colDefs + ')';\n\n    return {\n      table_name: tableName,\n      table_type: tableTypeFromName(tableName),\n      ddl,\n    };\n  }\n\n  const existingVaultTables = await Promise.all(\n    existingNames\n      .filter(n => n && !vaultByName[n])\n      .map(n => buildPseudoDDL.call(this, n))\n  );\n\n  for (const t of existingVaultTables) {\n    if (t && t.table_name && !vaultByName[t.table_name]) vaultByName[t.table_name] = t;\n  }\n\n  const allVault = Object.values(vaultByName);\n\n  return [\n    {\n      json: {\n        mart_request: {\n          vault_tables: allVault,\n          mart_table_name: plan.mart_table_name,\n          grain: plan.grain,\n          metrics: plan.metrics || [],\n          business_keys: plan.business_keys || [],\n        },\n        vault_tables: allVault,\n        plan: plan,\n      },\n    },\n  ];\n})();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    3520,
+                    500
+                ],
+                "id": "c3333333-3333-4333-8333-333333333333",
+                "name": "Build Mart Request"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const body = $json.mart_request;\nconst _ts_start = Date.now();\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://localhost:5678/webhook/info-mart-agent',\n      headers: { 'content-type': 'application/json' },\n      body,\n      json: true,\n      timeout: 120000,\n    });\n\n    const result = (res && typeof res === 'object') ? res : { value: res };\n    result._ts_mart_ms = Date.now() - _ts_start;\n    return [{ json: result }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const raw = e.response?.data ?? e.response?.body;\n\n    if (raw && typeof raw === 'object' && raw.detail) detail = String(raw.detail);\n    else if (typeof raw === 'string' && raw.length) {\n      try {\n        const p = JSON.parse(raw);\n        if (p.detail) detail = String(p.detail);\n      } catch (_) {}\n      detail = raw.slice(0, 800);\n    }\n\n    return [{\n      json: {\n        status: 'error',\n        error: detail,\n        mart_table: {},\n        _ts_mart_ms: Date.now() - _ts_start,\n      },\n    }];\n  }\n})();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    3740,
+                    500
+                ],
+                "id": "c4444444-4444-4444-8444-444444444444",
+                "name": "Call Info Mart Agent"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const martResult = $input.first().json;\nconst prev = $('Build Mart Request').first().json;\nconst plan = prev.plan;\nconst stgData = $('Create Staging Tables').first().json;\nconst mart = martResult.mart_table || {};\nconst stmts = [];\n// Drop the existing mart before recreating it so CREATE TABLE IF NOT EXISTS is not a no-op\nif (plan.mart_table_name) stmts.push('DROP TABLE IF EXISTS ' + plan.mart_table_name);\nif (mart.ddl) stmts.push(mart.ddl);\nif (mart.populate_sql) mart.populate_sql.split(';').map(s => s.trim()).filter(s => s).forEach(s => stmts.push(s));\nstgData.staging_tables.forEach(t => stmts.push('DROP TABLE IF EXISTS ' + t.name));\nreturn [{\n  json: {\n    mart_cleanup_statements: stmts,\n    mart_table: mart,\n    vault_tables: prev.vault_tables,\n    plan: plan\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    3960,
+                    500
+                ],
+                "id": "c5555555-5555-4555-8555-555555555555",
+                "name": "Collect Mart + Cleanup"
+            },
+            {
+                "parameters": {
+                    "method": "POST",
+                    "url": "http://duckdb-service:8001/execute-batch",
+                    "sendBody": true,
+                    "specifyBody": "json",
+                    "jsonBody": "={{ {statements:$json.mart_cleanup_statements, database:\"/data/vault.duckdb\"} }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [
+                    4180,
+                    500
+                ],
+                "id": "c6666666-6666-4666-8666-666666666666",
+                "name": "Execute Mart + Cleanup"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const body = (() => {\n  const d = $('Collect Mart + Cleanup').first().json;\n  return { vault_tables: d.vault_tables, mart_table: d.mart_table };\n})();\nconst _ts_start = Date.now();\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://localhost:5678/webhook/data-quality-agent',\n      headers: { 'content-type': 'application/json' },\n      body,\n      json: true,\n      timeout: 120000,\n    });\n    const result = res;\n    result._ts_dq_ms = Date.now() - _ts_start;\n    return [{ json: result }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const raw = e.response?.data ?? e.response?.body;\n    if (typeof raw === 'string' && raw.length) detail = raw.slice(0, 800);\n    else if (raw && typeof raw === 'object') detail = JSON.stringify(raw).slice(0, 800);\n    return [{\n      json: {\n        status: 'error',\n        checks_run: 0,\n        issues: [{\n          severity: 'error',\n          table: '_dq_webhook',\n          check: 'SYSTEM',\n          message: 'Data Quality Agent did not return JSON (sub-workflow error or non-JSON response): ' + detail,\n          count: 0,\n        }],\n        _ts_dq_ms: Date.now() - _ts_start,\n      },\n    }];\n  }\n})();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    5300,
+                    500
+                ],
+                "id": "c7777777-7777-4777-8777-777777777777",
+                "name": "Call DQ Agent"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const dq = $input.first().json;\nconst plan = $('Collect Mart + Cleanup').first().json.plan;\nreturn [{\n  json: {\n    dq_status: dq.status || 'unknown',\n    dq_issues: dq.issues || [],\n    dq_checks_run: dq.checks_run || 0,\n    final_query: plan.final_query,\n    plan: plan\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    5520,
+                    500
+                ],
+                "id": "c8888888-8888-4888-8888-888888888888",
+                "name": "Check DQ"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const baseUrl = 'http://duckdb-service:8001/query';\nconst database = '/data/vault.duckdb';\nconst sql = String($json.final_query || '').trim();\nif (!sql) {\n  return [{\n    json: {\n      status: 'error',\n      output: { error: 'final_query is empty', columns: [], data: [], row_count: 0, sql: '' },\n    },\n  }];\n}\n\nreturn (async () => {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: baseUrl,\n      headers: { 'content-type': 'application/json' },\n      body: { sql, database },\n      json: true,\n    });\n    return [{\n      json: {\n        status: 'success',\n        output: {\n          columns: res.columns || [],\n          data: res.rows || [],\n          row_count: res.row_count ?? (res.rows || []).length,\n          sql,\n          explanation: 'Executed via duckdb-service',\n        },\n      },\n    }];\n  } catch (e) {\n    let detail = e.message || String(e);\n    const d = e.response?.data ?? e.response?.body;\n    if (d && typeof d === 'object' && d.detail) detail = String(d.detail);\n    if (typeof d === 'string') {\n      try {\n        const p = JSON.parse(d);\n        if (p.detail) detail = String(p.detail);\n      } catch (_) {}\n    }\n    return [{\n      json: {\n        status: 'error',\n        output: { error: detail, columns: [], data: [], row_count: 0, sql },\n      },\n    }];\n  }\n})();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    5960,
+                    300
+                ],
+                "id": "c9999999-9999-4999-8999-999999999999",
+                "name": "Query Final Results"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const result = $input.first().json;\nconst dq = $('Check DQ').first().json;\nconst plan = dq.plan;\nconst stgData = $('Create Staging Tables').first().json;\nconst vaultData = $('Collect Vault SQL').first().json;\nconst martData = $('Collect Mart + Cleanup').first().json;\nconst dvAgent = $('Call Data Vault Agent').first().json;\nconst imAgent = $('Call Info Mart Agent').first().json;\nconst dqAgent = $('Call DQ Agent').first().json;\n\nconst topStatus = result.status === 'error' ? 'error' : 'success';\n\nconst timings = {\n  total_ms: Date.now() - (stgData._ts_start || Date.now()),\n  data_vault_agent_ms: dvAgent._ts_vault_ms || null,\n  info_mart_agent_ms: imAgent._ts_mart_ms || null,\n  dq_agent_ms: dqAgent._ts_dq_ms || null\n};\n\nconst generated_sql = {\n  vault: (vaultData.vault_tables || []).map(t => ({\n    table_name: t.table_name,\n    table_type: t.table_type,\n    ddl: t.ddl,\n    load_sql: t.load_sql\n  })),\n  mart: martData.mart_table ? {\n    table_name: martData.mart_table.table_name,\n    ddl: martData.mart_table.ddl,\n    populate_sql: martData.mart_table.populate_sql\n  } : null\n};\n\nreturn [{\n  json: {\n    status: topStatus,\n    routing: plan.routing_decision,\n    understood_request: plan.understood_request,\n    mart_created: plan.mart_table_name,\n    vault_tables_created: plan.vault_tables_to_create || [],\n    existing_tables_reused: plan.existing_tables_to_reuse || [],\n    source_tables_extracted: (stgData.staging_tables || []).map(t => t.original_source),\n    dq_status: dq.dq_status,\n    dq_checks_run: dq.dq_checks_run,\n    dq_issues: dq.dq_issues,\n    timings: timings,\n    generated_sql: generated_sql,\n    output: result.output || result\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    6180,
+                    300
+                ],
+                "id": "d1111111-1111-4111-8111-111111111111",
+                "name": "Format Build Response"
+            },
+            {
+                "parameters": {
+                    "respondWith": "json",
+                    "responseBody": "={{ $json }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.respondToWebhook",
+                "typeVersion": 1.1,
+                "position": [
+                    6400,
+                    300
+                ],
+                "id": "d2222222-2222-4222-8222-222222222222",
+                "name": "Respond BUILD"
+            },
+            {
+                "parameters": {
+                    "conditions": {
+                        "options": {
+                            "caseSensitive": true,
+                            "leftValue": "",
+                            "typeValidation": "strict"
+                        },
+                        "conditions": [
+                            {
+                                "id": "dq-gate-cond-1",
+                                "leftValue": "={{ $json.dq_status }}",
+                                "rightValue": "pass",
+                                "operator": {
+                                    "type": "string",
+                                    "operation": "equals"
+                                }
+                            }
+                        ],
+                        "combinator": "and"
+                    },
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 2.2,
+                "position": [
+                    5740,
+                    500
+                ],
+                "id": "d3333333-3333-4333-8333-333333333333",
+                "name": "DQ Gate"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const dq = $input.first().json;\nconst plan = dq.plan;\nconst stgData = $('Create Staging Tables').first().json;\nconst vaultData = $('Collect Vault SQL').first().json;\nconst martData = $('Collect Mart + Cleanup').first().json;\nconst dvAgent = $('Call Data Vault Agent').first().json;\nconst imAgent = $('Call Info Mart Agent').first().json;\nconst dqAgent = $('Call DQ Agent').first().json;\n\nconst timings = {\n  total_ms: Date.now() - (stgData._ts_start || Date.now()),\n  data_vault_agent_ms: dvAgent._ts_vault_ms || null,\n  info_mart_agent_ms: imAgent._ts_mart_ms || null,\n  dq_agent_ms: dqAgent._ts_dq_ms || null\n};\n\nconst generated_sql = {\n  vault: (vaultData.vault_tables || []).map(t => ({\n    table_name: t.table_name,\n    table_type: t.table_type,\n    ddl: t.ddl,\n    load_sql: t.load_sql\n  })),\n  mart: martData.mart_table ? {\n    table_name: martData.mart_table.table_name,\n    ddl: martData.mart_table.ddl,\n    populate_sql: martData.mart_table.populate_sql\n  } : null\n};\n\nreturn [{\n  json: {\n    status: 'error',\n    routing: plan.routing_decision,\n    understood_request: plan.understood_request,\n    mart_created: plan.mart_table_name,\n    vault_tables_created: plan.vault_tables_to_create || [],\n    existing_tables_reused: plan.existing_tables_to_reuse || [],\n    source_tables_extracted: (stgData.staging_tables || []).map(t => t.original_source),\n    dq_status: dq.dq_status,\n    dq_checks_run: dq.dq_checks_run,\n    dq_issues: dq.dq_issues,\n    timings: timings,\n    generated_sql: generated_sql,\n    output: {\n      error: 'Data quality checks failed \u2014 ' + (dq.dq_issues || []).length + ' issue(s) found. Vault tables that loaded successfully are preserved. Retry to regenerate failed tables.',\n      columns: [],\n      data: [],\n      row_count: 0,\n      sql: dq.final_query || ''\n    }\n  }\n}];"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    5960,
+                    700
+                ],
+                "id": "d5555555-5555-4555-8555-555555555555",
+                "name": "Format DQ Fail Response"
+            },
+            {
+                "parameters": {
+                    "respondWith": "json",
+                    "responseBody": "={{ $json }}",
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.respondToWebhook",
+                "typeVersion": 1.1,
+                "position": [
+                    6180,
+                    700
+                ],
+                "id": "d4444444-4444-4444-8444-444444444444",
+                "name": "Respond DQ FAIL"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const prev = $('Collect Mart + Cleanup').first().json;\nconst plan = prev.plan;\nconst martName = plan.mart_table_name;\nconst retryCount = prev.retry_count || 0;\n\nreturn (async () => {\n  const database = '/data/vault.duckdb';\n  const baseUrl = 'http://duckdb-service:8001/query';\n  \n  // Check 1: row count\n  const countRes = await this.helpers.httpRequest({\n    method: 'POST', url: baseUrl,\n    headers: { 'content-type': 'application/json' },\n    body: { sql: 'SELECT COUNT(*) AS cnt FROM ' + martName, database },\n    json: true,\n  });\n  const rowCount = countRes.rows?.[0]?.cnt || 0;\n  \n  if (rowCount === 0) {\n    return [{ json: { valid: false, retry_count: retryCount, error: 'Mart table is empty (0 rows)', plan, mart_table: prev.mart_table, vault_tables: prev.vault_tables } }];\n  }\n  \n  // Check 2: sample rows for NULL dimension columns\n  const sampleRes = await this.helpers.httpRequest({\n    method: 'POST', url: baseUrl,\n    headers: { 'content-type': 'application/json' },\n    body: { sql: 'SELECT * FROM ' + martName + ' LIMIT 10', database },\n    json: true,\n  });\n  \n  const rows = sampleRes.rows || [];\n  const columns = sampleRes.columns || [];\n  \n  // Find columns where ALL sampled values are null (excluding mart_insert_dts and numeric metrics)\n  const nullCols = [];\n  for (const col of columns) {\n    if (col === 'mart_insert_dts') continue;\n    const allNull = rows.every(r => r[col] === null || r[col] === undefined);\n    if (allNull && rows.length > 0) nullCols.push(col);\n  }\n  \n  if (nullCols.length > 0) {\n    return [{ json: { \n      valid: false, \n      retry_count: retryCount,\n      error: 'Mart has all-NULL columns: ' + nullCols.join(', ') + '. The JOIN to populate these columns likely used mismatched keys. Ensure all JOINs between hub, satellite, and link tables use matching hash keys (_hk columns).',\n      null_columns: nullCols,\n      plan, \n      mart_table: prev.mart_table, \n      vault_tables: prev.vault_tables \n    } }];\n  }\n  \n  return [{ json: { valid: true, retry_count: retryCount, plan, mart_table: prev.mart_table, vault_tables: prev.vault_tables } }];\n})();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    4400,
+                    500
+                ],
+                "id": "e1111111-1111-4111-8111-111111111111",
+                "name": "Validate Mart"
+            },
+            {
+                "parameters": {
+                    "conditions": {
+                        "options": {
+                            "caseSensitive": true,
+                            "leftValue": "",
+                            "typeValidation": "strict"
+                        },
+                        "conditions": [
+                            {
+                                "id": "mart-valid-cond-1",
+                                "leftValue": "={{ $json.valid }}",
+                                "rightValue": true,
+                                "operator": {
+                                    "type": "boolean",
+                                    "operation": "true"
+                                }
+                            }
+                        ],
+                        "combinator": "and"
+                    },
+                    "options": {}
+                },
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 2.2,
+                "position": [
+                    4620,
+                    500
+                ],
+                "id": "e2222222-2222-4222-8222-222222222222",
+                "name": "Mart Valid?"
+            },
+            {
+                "parameters": {
+                    "jsCode": "const prev = $input.first().json;\nconst retryCount = prev.retry_count || 0;\n\nreturn (async () => {\n  if (retryCount >= 1) {\n    // Already retried once, give up and let DQ Agent handle it\n    return [{ json: { valid: true, skip_retry: true, plan: prev.plan, mart_table: prev.mart_table, vault_tables: prev.vault_tables } }];\n  }\n  \n  // Build enhanced mart request with error feedback\n  const martRequest = {\n    vault_tables: prev.vault_tables,\n    mart_table_name: prev.plan.mart_table_name,\n    grain: prev.plan.grain,\n    metrics: prev.plan.metrics || [],\n    business_keys: prev.plan.business_keys || [],\n    previous_error: prev.error,\n    retry_instructions: 'The previous mart SQL produced NULL values in columns: ' + (prev.null_columns || []).join(', ') + '. This is because the JOINs used mismatched keys. IMPORTANT RULES FOR JOINS: (1) Join hub to satellite using the hub hash key (e.g. hub_product.product_hk = sat_product_details.product_hk). (2) Join hub to link using the hub hash key (e.g. hub_product.product_hk = lnk_product_location.product_hk). (3) Join link to satellite using the link hash key (e.g. lnk_product_location.product_location_hk = sat_inventory_levels.product_location_hk). (4) Always filter current satellite records with WHERE load_end_dts IS NULL. Please regenerate the populate SQL with correct JOINs.'\n  };\n  \n  // Call Info Mart Agent again\n  const martRes = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'http://localhost:5678/webhook/info-mart-agent',\n    headers: { 'content-type': 'application/json' },\n    body: martRequest,\n    json: true,\n    timeout: 120000,\n  });\n  \n  const mart = martRes.mart_table || {};\n  const stmts = [];\n  \n  // Drop and rebuild\n  stmts.push('DROP TABLE IF EXISTS ' + prev.plan.mart_table_name);\n  if (mart.ddl) stmts.push(mart.ddl);\n  if (mart.populate_sql) mart.populate_sql.split(';').map(s => s.trim()).filter(s => s).forEach(s => stmts.push(s));\n  \n  // Execute the new mart SQL\n  const execRes = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'http://duckdb-service:8001/execute-batch',\n    headers: { 'content-type': 'application/json' },\n    body: { statements: stmts, database: '/data/vault.duckdb' },\n    json: true,\n    timeout: 60000,\n  });\n  \n  // Now validate again\n  const database = '/data/vault.duckdb';\n  const baseUrl = 'http://duckdb-service:8001/query';\n  const martName = prev.plan.mart_table_name;\n  \n  const countRes = await this.helpers.httpRequest({\n    method: 'POST', url: baseUrl,\n    headers: { 'content-type': 'application/json' },\n    body: { sql: 'SELECT COUNT(*) AS cnt FROM ' + martName, database },\n    json: true,\n  });\n  const rowCount = countRes.rows?.[0]?.cnt || 0;\n  \n  let nullCols = [];\n  if (rowCount > 0) {\n    const sampleRes = await this.helpers.httpRequest({\n      method: 'POST', url: baseUrl,\n      headers: { 'content-type': 'application/json' },\n      body: { sql: 'SELECT * FROM ' + martName + ' LIMIT 10', database },\n      json: true,\n    });\n    const rows = sampleRes.rows || [];\n    const columns = sampleRes.columns || [];\n    for (const col of columns) {\n      if (col === 'mart_insert_dts') continue;\n      const allNull = rows.every(r => r[col] === null || r[col] === undefined);\n      if (allNull && rows.length > 0) nullCols.push(col);\n    }\n  }\n  \n  const valid = rowCount > 0 && nullCols.length === 0;\n  \n  return [{ json: { \n    valid, \n    retry_count: retryCount + 1,\n    retried: true,\n    error: valid ? null : (rowCount === 0 ? 'Still empty after retry' : 'Still has NULL columns after retry: ' + nullCols.join(', ')),\n    null_columns: nullCols,\n    plan: prev.plan, \n    mart_table: mart,\n    vault_tables: prev.vault_tables \n  } }];\n})();"
+                },
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [
+                    4620,
+                    800
+                ],
+                "id": "e3333333-3333-4333-8333-333333333333",
+                "name": "Retry Mart"
+            }
+        ],
+        "connections": {
+            "Webhook": {
+                "main": [
+                    [
+                        {
+                            "node": "Read Source Catalog",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Read Source Catalog": {
+                "main": [
+                    [
+                        {
+                            "node": "Inspect Tables",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Inspect Tables": {
+                "main": [
+                    [
+                        {
+                            "node": "Classify Tables",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Classify Tables": {
+                "main": [
+                    [
+                        {
+                            "node": "Cleanup Stale Marts",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Cleanup Stale Marts": {
+                "main": [
+                    [
+                        {
+                            "node": "Build LLM Context",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Build LLM Context": {
+                "main": [
+                    [
+                        {
+                            "node": "Route Decision",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Route Decision": {
+                "main": [
+                    [
+                        {
+                            "node": "Parse Route",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Anthropic Chat Model": {
+                "ai_languageModel": [
+                    [
+                        {
+                            "node": "Route Decision",
+                            "type": "ai_languageModel",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Parse Route": {
+                "main": [
+                    [
+                        {
+                            "node": "Route Check",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Route Check": {
+                "main": [
+                    [
+                        {
+                            "node": "Query Mart",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ],
+                    [
+                        {
+                            "node": "Create Staging Tables",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Query Mart": {
+                "main": [
+                    [
+                        {
+                            "node": "Format Query Response",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Format Query Response": {
+                "main": [
+                    [
+                        {
+                            "node": "Respond QUERY",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Create Staging Tables": {
+                "main": [
+                    [
+                        {
+                            "node": "Run Staging SQL",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Run Staging SQL": {
+                "main": [
+                    [
+                        {
+                            "node": "Describe Staging",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Describe Staging": {
+                "main": [
+                    [
+                        {
+                            "node": "Build Vault Request",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Build Vault Request": {
+                "main": [
+                    [
+                        {
+                            "node": "Call Data Vault Agent",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Call Data Vault Agent": {
+                "main": [
+                    [
+                        {
+                            "node": "Collect Vault SQL",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Collect Vault SQL": {
+                "main": [
+                    [
+                        {
+                            "node": "Execute Vault SQL",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Execute Vault SQL": {
+                "main": [
+                    [
+                        {
+                            "node": "Build Mart Request",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Build Mart Request": {
+                "main": [
+                    [
+                        {
+                            "node": "Call Info Mart Agent",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Call Info Mart Agent": {
+                "main": [
+                    [
+                        {
+                            "node": "Collect Mart + Cleanup",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Collect Mart + Cleanup": {
+                "main": [
+                    [
+                        {
+                            "node": "Execute Mart + Cleanup",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Execute Mart + Cleanup": {
+                "main": [
+                    [
+                        {
+                            "node": "Validate Mart",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Call DQ Agent": {
+                "main": [
+                    [
+                        {
+                            "node": "Check DQ",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Check DQ": {
+                "main": [
+                    [
+                        {
+                            "node": "DQ Gate",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "DQ Gate": {
+                "main": [
+                    [
+                        {
+                            "node": "Query Final Results",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ],
+                    [
+                        {
+                            "node": "Format DQ Fail Response",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Format DQ Fail Response": {
+                "main": [
+                    [
+                        {
+                            "node": "Respond DQ FAIL",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Query Final Results": {
+                "main": [
+                    [
+                        {
+                            "node": "Format Build Response",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Format Build Response": {
+                "main": [
+                    [
+                        {
+                            "node": "Respond BUILD",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Validate Mart": {
+                "main": [
+                    [
+                        {
+                            "node": "Mart Valid?",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Mart Valid?": {
+                "main": [
+                    [
+                        {
+                            "node": "Call DQ Agent",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ],
+                    [
+                        {
+                            "node": "Retry Mart",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            },
+            "Retry Mart": {
+                "main": [
+                    [
+                        {
+                            "node": "Call DQ Agent",
+                            "type": "main",
+                            "index": 0
+                        }
+                    ]
+                ]
+            }
+        },
+        "authors": "Thinh Pham",
+        "name": null,
+        "description": null,
+        "autosaved": false,
+        "workflowPublishHistory": [
+            {
+                "createdAt": "2026-03-27T04:34:42.044Z",
+                "id": 129,
+                "workflowId": "EPobOCC4V3tBomcw",
+                "versionId": "0533a37f-353a-4d0b-a10a-5008909f4cd9",
+                "event": "activated",
+                "userId": "4d308f1a-e8cd-468b-bae5-ac7bc92538cc"
+            },
+            {
+                "createdAt": "2026-03-27T04:34:42.034Z",
+                "id": 128,
+                "workflowId": "EPobOCC4V3tBomcw",
+                "versionId": "0533a37f-353a-4d0b-a10a-5008909f4cd9",
+                "event": "deactivated",
+                "userId": "4d308f1a-e8cd-468b-bae5-ac7bc92538cc"
+            }
+        ]
+    }
+}

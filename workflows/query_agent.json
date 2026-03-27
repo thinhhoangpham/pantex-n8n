@@ -1,0 +1,179 @@
+{
+  "name": "Query Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "query-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 300],
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Webhook",
+      "webhookId": "query-agent-webhook-id"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Task: {{ $json.body.task }}\nDatabase: {{ $json.body.database }}\n{% if $json.body.context %}Additional context: {{ $json.body.context }}{% endif %}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "You are a Query Agent for an inventory data system.\nYou have access to two DuckDB databases:\n\n1. /data/source.duckdb — read-only source data in named schemas:\n- erp.products (product_id, product_name, sku, unit_cost, list_price, safety_stock, reorder_point, product_line, product_class, size, weight_lbs)\n- erp.inventory_levels (product_id, location_id, shelf, bin, qty_on_hand, last_updated)\n- erp.locations (location_id, location_name, cost_rate, capacity)\n- erp.work_orders (wo_id, product_id, qty_required, qty_stocked, qty_scrapped, start_date, end_date, due_date)\n- procurement.vendors (vendor_id, account_number, vendor_name, credit_rating, is_active, is_preferred, last_updated)\n- procurement.purchase_orders (po_id, vendor_id, status, status_code, order_date, ship_date, subtotal, tax_amount, total_due)\n- procurement.po_lines (po_id, line_id, product_id, qty_ordered, unit_price, qty_received, qty_rejected, qty_stocked, due_date)\n- wms.warehouses (warehouse_id, warehouse_name, city, capacity_sqft)\n- wms.stock_movements (movement_id, product_id, location_id, movement_type, quantity, movement_date, reference_doc)\n\n2. /data/vault.duckdb — pipeline output in the main schema (no schema prefix):\n- hub_*, lnk_*, sat_* — Data Vault tables\n- mart_* — Information Mart tables\n- stg_* — temporary staging tables (present only during active pipeline runs)\n\nGiven a task, generate a DuckDB-compatible SQL query.\n\nRules:\n- The database path is provided in the request body — use it exactly as-is. Do NOT substitute a different path.\n- For source data queries (erp.*, procurement.*, wms.*): the database will be /data/source.duckdb\n- For vault/mart queries (hub_*, lnk_*, sat_*, mart_*, stg_*): the database will be /data/vault.duckdb\n- Always qualify source table names with their schema: erp.products, procurement.vendors, wms.stock_movements, etc.\n- Vault and mart tables use no schema prefix: SELECT * FROM hub_product, SELECT * FROM mart_low_stock\n- For schema inspection: use SHOW ALL TABLES or SELECT * FROM information_schema.tables\n- For data extraction: add LIMIT 20 unless told otherwise\n- For final results: return the complete query\n- Use DuckDB SQL syntax (not PostgreSQL or MySQL)\n\nRespond ONLY with valid JSON, no markdown code fences:\n{\"sql\": \"SELECT ...\", \"explanation\": \"what this query does\"}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [300, 300],
+      "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "name": "Generate SQL"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-haiku-4-5-20251001"
+        },
+        "options": {
+          "maxTokensToSample": 2048
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [300, 500],
+      "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "WZvvDOFtpiYtjRLz",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const llmOutput = $input.first().json.text;\n\nlet parsed;\ntry {\n  // Try to parse directly\n  parsed = JSON.parse(llmOutput);\n} catch (e) {\n  // Try to extract JSON from markdown code fences\n  const match = llmOutput.match(/```(?:json)?\\s*([\\s\\S]*?)```/);\n  if (match) {\n    parsed = JSON.parse(match[1].trim());\n  } else {\n    throw new Error('Could not parse LLM output as JSON: ' + llmOutput.substring(0, 200));\n  }\n}\n\n// Get the original request body for database path\nconst webhookData = $('Webhook').first().json.body;\n\nreturn {\n  json: {\n    sql: parsed.sql,\n    explanation: parsed.explanation,\n    database: webhookData.database || '/data/source.duckdb'\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 300],
+      "id": "d4e5f6a7-b8c9-0123-defa-234567890123",
+      "name": "Parse SQL"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://duckdb-service:8001/query",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({sql: $json.sql, database: $json.database}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300],
+      "id": "e5f6a7b8-c9d0-1234-efab-345678901234",
+      "name": "Run Query"
+    },
+    {
+      "parameters": {
+        "jsCode": "const queryResult = $input.first().json;\nconst parseData = $('Parse SQL').first().json;\n\n// Handle error from duckdb-service\nif (queryResult.status === 'error' || queryResult.detail) {\n  return {\n    json: {\n      status: 'error',\n      output: {\n        error: queryResult.detail || 'Query execution failed',\n        sql: parseData.sql,\n        explanation: parseData.explanation\n      }\n    }\n  };\n}\n\nreturn {\n  json: {\n    status: 'success',\n    output: {\n      columns: queryResult.columns || [],\n      data: queryResult.rows || [],\n      row_count: queryResult.row_count || 0,\n      sql: parseData.sql,\n      explanation: parseData.explanation\n    }\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 300],
+      "id": "f6a7b8c9-d0e1-2345-fabc-456789012345",
+      "name": "Format Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1500, 300],
+      "id": "a7b8c9d0-e1f2-3456-abcd-567890123456",
+      "name": "Respond to Webhook"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Generate SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate SQL": {
+      "main": [
+        [
+          {
+            "node": "Parse SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Generate SQL",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse SQL": {
+      "main": [
+        [
+          {
+            "node": "Run Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Query": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

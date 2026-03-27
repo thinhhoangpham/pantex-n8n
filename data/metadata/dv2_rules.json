@@ -1,0 +1,87 @@
+{
+  "glossary": {
+    "hub": "A Hub stores the unique business identifiers for a core business concept (e.g. a product, a vendor, a warehouse). Each hub has one row per distinct business key — no duplicates. Hubs do NOT store descriptive attributes, only the key. They are the anchor points of the vault that everything else connects to.",
+    "link": "A Link records a relationship between two or more hubs. For example, a link between a product hub and a vendor hub says 'this product was ordered from this vendor.' Links store only hash keys pointing to the hubs they connect — no descriptive attributes. One row per unique combination of the connected hub keys.",
+    "satellite": "A Satellite stores the descriptive attributes (the 'facts') that belong to a hub or link. For example, a product satellite stores the product name, price, and weight. Satellites are historized: when a value changes, a new row is inserted rather than the old row being updated. Each row has a load date and an end date so you can see what the data looked like at any point in time.",
+    "mart": "An Information Mart (mart) is a business-friendly, pre-joined view of vault data optimized for answering a specific business question. Marts use readable business key columns instead of hash keys, avoid vault-internal columns like load_end_dts, and are rebuilt on each pipeline run. A mart is the output layer that analysts query."
+  },
+  "naming": {
+    "hub_prefix": "hub_",
+    "link_prefix": "lnk_",
+    "satellite_prefix": "sat_",
+    "mart_prefix": "mart_",
+    "hash_key_suffix": "_hk",
+    "business_key_suffix": "_bk",
+    "examples": {
+      "hub": "hub_product, hub_vendor, hub_warehouse",
+      "link": "lnk_po_product, lnk_segment_vendor",
+      "satellite": "sat_product_details, sat_vendor_attributes, sat_po_line_metrics",
+      "mart": "mart_inventory_by_warehouse, mart_vendor_fulfillment_summary"
+    }
+  },
+  "required_columns": {
+    "hub": [
+      {"name": "<entity>_hk", "type": "VARCHAR(32)", "description": "MD5 hash of the business key. Primary key of the hub. Named after the entity (e.g. product_hk for hub_product)."},
+      {"name": "<entity>_bk", "type": "VARCHAR", "description": "The raw business key value from the source system (e.g. the product_id string from erp.products). Must never be NULL."},
+      {"name": "load_dts", "type": "TIMESTAMP", "description": "Timestamp when this record was first loaded into the vault."},
+      {"name": "record_source", "type": "VARCHAR", "description": "Identifies which source system this record came from (see record_sources list)."}
+    ],
+    "link": [
+      {"name": "<link_name>_hk", "type": "VARCHAR(32)", "description": "MD5 hash of the concatenated hub hash keys that this link connects. Primary key of the link."},
+      {"name": "<hub1>_hk", "type": "VARCHAR(32)", "description": "FK — hash key of the first hub being linked."},
+      {"name": "<hub2>_hk", "type": "VARCHAR(32)", "description": "FK — hash key of the second hub being linked. Add more hub FK columns if the link connects more than two hubs."},
+      {"name": "load_dts", "type": "TIMESTAMP", "description": "Timestamp when this relationship was first loaded into the vault."},
+      {"name": "record_source", "type": "VARCHAR", "description": "Identifies which source system this record came from."}
+    ],
+    "satellite": [
+      {"name": "<parent>_hk", "type": "VARCHAR(32)", "description": "FK — hash key of the parent hub or link this satellite describes."},
+      {"name": "load_dts", "type": "TIMESTAMP", "description": "Timestamp when this version of the record was loaded. Together with the parent hash key this forms the composite primary key."},
+      {"name": "load_end_dts", "type": "TIMESTAMP", "description": "Timestamp when this record was superseded by a newer version. NULL means this is the current active record."},
+      {"name": "record_source", "type": "VARCHAR", "description": "Identifies which source system this record came from."},
+      {"name": "... (descriptive columns)", "type": "varies", "description": "All descriptive/attribute columns from the source system that belong to this satellite's subject area."}
+    ],
+    "mart": [
+      {"name": "... (business key columns)", "type": "VARCHAR", "description": "Use _bk suffixed business key columns from the relevant hubs — never hash keys."},
+      {"name": "... (metric/attribute columns)", "type": "varies", "description": "All measure and descriptive columns needed to answer the target business question."},
+      {"name": "mart_insert_dts", "type": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "description": "Audit column recording when this mart row was inserted. Always the last column."}
+    ]
+  },
+  "hash": {
+    "algorithm": "MD5",
+    "key_type": "VARCHAR(32)",
+    "duckdb_expression": "md5(UPPER(TRIM(CAST(<business_key_column> AS VARCHAR))))",
+    "composite_key_expression": "md5(UPPER(TRIM(CAST(col1 AS VARCHAR))) || '|' || UPPER(TRIM(CAST(col2 AS VARCHAR))))",
+    "separator": "|",
+    "notes": "Always UPPER and TRIM the input before hashing to ensure consistency. Use '|' as the separator when hashing composite keys."
+  },
+  "record_sources": [
+    "SOURCE_ERP",
+    "SOURCE_PROCUREMENT",
+    "SOURCE_WMS"
+  ],
+  "databases": {
+    "source": "/data/source.duckdb",
+    "vault": "/data/vault.duckdb"
+  },
+  "conventions": {
+    "naming": "snake_case",
+    "no_hash_keys_in_mart": true,
+    "business_key_suffix": "_bk",
+    "mart_audit_column": "mart_insert_dts TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    "current_record_filter": "WHERE load_end_dts IS NULL",
+    "idempotent_ddl": "Use CREATE TABLE IF NOT EXISTS for all vault and mart tables so repeated runs do not error",
+    "satellite_historization": "On load, set load_end_dts = CURRENT_TIMESTAMP on existing rows before inserting new rows. Do not update or delete old rows.",
+    "hub_dedup": "Insert only rows whose business key does not already exist in the hub (use WHERE NOT EXISTS or INSERT OR IGNORE pattern)",
+    "link_dedup": "Insert only rows whose combined hub hash keys do not already exist in the link",
+    "mart_rebuild": "Marts are rebuilt when stale or missing: DELETE all rows, then INSERT fresh. Use CREATE TABLE IF NOT EXISTS to create on first run.",
+    "mart_ttl_hours": 24,
+    "mart_cleanup_hours": 48,
+    "mart_expiry_note": "Marts older than mart_ttl_hours are rebuilt on next request. Marts older than mart_cleanup_hours are dropped automatically at the start of the next Dispatcher run.",
+    "null_handling": "Never store NULL in business key columns. If a source key is NULL, exclude the row from the load.",
+    "schema": "Two separate DuckDB databases are used. Source tables live in /data/source.duckdb under schema-qualified names (erp.products, procurement.vendors, wms.stock_movements, etc.) — this database is read-only and never modified by the pipeline. Vault tables (hub_*, lnk_*, sat_*), mart tables (mart_*), and temporary staging tables (stg_*) all live in the main schema (no prefix) of /data/vault.duckdb.",
+    "staging_prefix": "stg_",
+    "staging_naming": "stg_<schema>_<table> (e.g., stg_erp_products, stg_procurement_vendors, stg_wms_stock_movements)",
+    "staging_rule": "Data Vault Agent load SQL must SELECT from stg_* staging tables only — never from the original source schemas (erp.*, procurement.*, wms.*). Staging tables are created in vault.duckdb by the Dispatcher (using ATTACH to read from source.duckdb) before the Data Vault Agent runs.",
+    "staging_cleanup": "Staging tables are dropped from vault.duckdb by the Dispatcher via HTTP Request to duckdb-service after the full pipeline completes (after vault and mart SQL has been executed)."
+  }
+}

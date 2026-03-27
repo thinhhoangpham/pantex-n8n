@@ -1,0 +1,176 @@
+{
+  "name": "Info Mart Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "info-mart-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 300],
+      "id": "im01a1b2-c3d4-e5f6-a7b8-c9d0e1f2a3b4",
+      "name": "Webhook",
+      "webhookId": "info-mart-agent-webhook-id"
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "/data/metadata/dv2_rules.json",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "id": "im02b2c3-d4e5-f6a7-b8c9-d0e1f2a3b4c5",
+      "name": "Read File"
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhookData = $('Webhook').first().json.body;\n\nconst fileData = $input.first().json;\nlet dv2Rules;\ntry {\n  if (fileData.data) {\n    dv2Rules = JSON.parse(Buffer.from(fileData.data, 'base64').toString('utf-8'));\n  } else if (fileData.json) {\n    dv2Rules = typeof fileData.json === 'string' ? JSON.parse(fileData.json) : fileData.json;\n  } else {\n    dv2Rules = fileData;\n  }\n} catch (e) {\n  dv2Rules = fileData;\n}\n\nreturn {\n  json: {\n    vault_tables: webhookData.vault_tables,\n    mart_table_name: webhookData.mart_table_name,\n    grain: webhookData.grain,\n    metrics: webhookData.metrics || [],\n    business_keys: webhookData.business_keys || [],\n    dv2_rules: dv2Rules\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300],
+      "id": "im03c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d6",
+      "name": "Merge Context"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Generate a mart table for the following request.\n\nAVAILABLE VAULT TABLES (with their DDL):\n{{ JSON.stringify($json.vault_tables, null, 2) }}\n\nMART TABLE NAME: {{ $json.mart_table_name }}\nGRAIN: {{ $json.grain }}\nMETRICS: {{ JSON.stringify($json.metrics) }}\nBUSINESS KEYS: {{ JSON.stringify($json.business_keys) }}\n\nDV2 RULES:\n{{ JSON.stringify($json.dv2_rules, null, 2) }}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "You are an Info Mart Agent for an inventory data system.\n\nYou receive a list of existing vault tables (with their DDL), a mart table name, grain, metrics, and business keys. Your job is to generate DDL and populate SQL for a business-friendly mart table.\n\nVault tables are in /data/vault.duckdb, in the main schema (no prefix needed). Do not reference source tables (erp.*, procurement.*, wms.*) — those are in a separate read-only database and the mart must be built from vault tables only.\n\nMART RULES:\n1. Use CREATE TABLE IF NOT EXISTS for the DDL.\n2. The mart table name must start with mart_ prefix.\n3. NO hash keys (_hk) in the mart — use business key columns with _bk suffix from the hubs instead. For example, use product_bk (the actual product_id value) instead of product_hk (the MD5 hash).\n4. NO DV2 technical columns in the mart — no load_dts, load_end_dts, hashdiff, record_source.\n5. Filter current satellite records only: JOIN with WHERE load_end_dts IS NULL.\n6. Always include mart_insert_dts TIMESTAMP DEFAULT CURRENT_TIMESTAMP as the last column in the DDL. In the INSERT SELECT, you MUST also select CURRENT_TIMESTAMP AS mart_insert_dts as the last value so the column count matches the DDL.\n7. The populate SQL should first DELETE all existing rows, then INSERT fresh data. This ensures the mart is rebuilt with current data on every run.\n8. Match the stated grain exactly — if grain is \"one row per product\", ensure the query produces one row per product (use GROUP BY if needed).\n9. Include all requested metrics as columns.\n10. Include all business key columns for identification.\n11. Add useful descriptive columns from satellites (like names, codes) for readability.\n12. Use DuckDB SQL syntax.\n13. The populate_sql should be two statements separated by semicolon: DELETE FROM mart_xxx; INSERT INTO mart_xxx SELECT ...\n14. CRITICAL — Vault table names: In ddl and populate_sql, reference ONLY tables listed under AVAILABLE VAULT TABLES. Use the exact table_name spelling from that JSON (and columns from each table's DDL). Never invent hub_, lnk_, or sat_ tables. Example failure to avoid: using sat_inventory_stock_status when the list only contains sat_inventory_levels.\n\nRespond ONLY with valid JSON (no markdown code fences):\n{\n  \"mart_table\": {\n    \"table_name\": \"mart_...\",\n    \"ddl\": \"CREATE TABLE IF NOT EXISTS mart_... (...)\",\n    \"populate_sql\": \"DELETE FROM mart_...; INSERT INTO mart_... SELECT ...\"\n  }\n}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [800, 300],
+      "id": "im04d4e5-f6a7-b8c9-d0e1-f2a3b4c5d6e7",
+      "name": "Generate Mart SQL"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-haiku-4-5-20251001"
+        },
+        "options": {
+          "maxTokensToSample": 16384
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [800, 500],
+      "id": "im05e5f6-a7b8-c9d0-e1f2-a3b4c5d6e7f8",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "WZvvDOFtpiYtjRLz",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const llmOutput = $input.first().json.text;\n\nlet parsed;\ntry {\n  parsed = JSON.parse(llmOutput);\n} catch (e) {\n  let jsonStr = llmOutput;\n  const fenceMatch = llmOutput.match(/```(?:json)?\\s*([\\s\\S]*?)```/);\n  if (fenceMatch) {\n    jsonStr = fenceMatch[1].trim();\n  } else if (llmOutput.startsWith('```')) {\n    jsonStr = llmOutput.replace(/^```(?:json)?\\s*/, '').trim();\n  }\n\n  try {\n    parsed = JSON.parse(jsonStr);\n  } catch (e2) {\n    let recovered = jsonStr;\n    const quoteCount = (recovered.match(/(?<!\\\\)\"\/g) || []).length;\n    if (quoteCount % 2 !== 0) recovered += '\"';\n    const stack = [];\n    for (const ch of recovered) {\n      if (ch === '{' || ch === '[') stack.push(ch);\n      else if (ch === '}' || ch === ']') stack.pop();\n    }\n    while (stack.length > 0) {\n      const last = stack.pop();\n      recovered += last === '{' ? '}' : ']';\n    }\n    try {\n      parsed = JSON.parse(recovered);\n    } catch (e3) {\n      throw new Error('Could not parse LLM output as JSON: ' + llmOutput.substring(0, 300));\n    }\n  }\n}\n\n// Be tolerant about slightly different JSON shapes.\n// The LLM should return { mart_table: { table_name, ddl, populate_sql } },\n// but sometimes it returns those fields at the top level.\nif (!parsed.mart_table) {\n  if (parsed.table_name && parsed.ddl && parsed.populate_sql) {\n    parsed = { mart_table: parsed };\n  } else if (parsed.mart_table_name && parsed.ddl && parsed.populate_sql) {\n    parsed = {\n      mart_table: {\n        table_name: parsed.mart_table_name,\n        ddl: parsed.ddl,\n        populate_sql: parsed.populate_sql,\n      },\n    };\n  } else if (parsed.table && parsed.ddl && parsed.populate_sql) {\n    parsed = {\n      mart_table: {\n        table_name: parsed.table,\n        ddl: parsed.ddl,\n        populate_sql: parsed.populate_sql,\n      },\n    };\n  }\n}\n\nif (!parsed.mart_table) {\n  throw new Error('LLM output missing mart_table object');\n}\n\nconst mart = parsed.mart_table;\nif (!mart.table_name || !mart.ddl || !mart.populate_sql) {\n  throw new Error('Mart table entry missing required fields: table_name, ddl, or populate_sql');\n}\n\nreturn {\n  json: {\n    status: 'success',\n    mart_table: mart\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 300],
+      "id": "im06f6a7-b8c9-d0e1-f2a3-b4c5d6e7f8a9",
+      "name": "Parse Output"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1400, 300],
+      "id": "im07a7b8-c9d0-e1f2-a3b4-c5d6e7f8a9b0",
+      "name": "Respond to Webhook"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read File": {
+      "main": [
+        [
+          {
+            "node": "Merge Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Context": {
+      "main": [
+        [
+          {
+            "node": "Generate Mart SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Mart SQL": {
+      "main": [
+        [
+          {
+            "node": "Parse Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Output": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Generate Mart SQL",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

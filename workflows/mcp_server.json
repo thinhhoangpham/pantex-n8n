@@ -1,0 +1,138 @@
+{
+  "name": "MCP Server",
+  "nodes": [
+    {
+      "parameters": {
+        "authentication": "none",
+        "path": "inventory-tools"
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ],
+      "id": "mcp0000-0000-4000-8000-000000000001",
+      "name": "MCP Server Trigger",
+      "webhookId": "mcp-inventory-tools-wh"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Run a SQL query against either the source database (source.duckdb) or the vault database (vault.duckdb). Use database=/data/source.duckdb for raw ERP/procurement/WMS data and database=/data/vault.duckdb for vault and mart tables.",
+        "method": "POST",
+        "url": "http://duckdb-service:8001/query",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"sql\": \"{sql}\", \"database\": \"{database}\"}",
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "sql",
+              "description": "The SQL query to execute. Use schema-qualified names (e.g. erp.products) for source.duckdb tables, and unqualified names (e.g. hub_product) for vault.duckdb tables.",
+              "type": "string"
+            },
+            {
+              "name": "database",
+              "description": "The database file path to query. Must be either /data/source.duckdb (for raw source data in erp, procurement, wms schemas) or /data/vault.duckdb (for vault hub/link/satellite tables and mart tables).",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        -300,
+        560
+      ],
+      "id": "mcp0000-0000-4000-8000-000000000002",
+      "name": "run_query"
+    },
+    {
+      "parameters": {
+        "name": "describe_schema",
+        "description": "List all tables available in a database. Returns table names grouped by schema. Use database=/data/source.duckdb for source tables or database=/data/vault.duckdb for vault and mart tables.",
+        "language": "javaScript",
+        "jsCode": "const database = query.database || \"/data/vault.duckdb\";\nconst url = \"http://duckdb-service:8001/query\";\nconst sql = \"SELECT table_schema, table_name, table_type FROM information_schema.tables ORDER BY table_schema, table_name\";\n\ntry {\n  const res = await this.helpers.httpRequest({\n    method: \"POST\",\n    url,\n    headers: { \"Content-Type\": \"application/json\" },\n    body: { sql, database },\n    json: true\n  });\n  const rows = res.rows || [];\n  const grouped = {};\n  for (const row of rows) {\n    const schema = row.table_schema || \"main\";\n    if (!grouped[schema]) grouped[schema] = [];\n    grouped[schema].push(row.table_name);\n  }\n  return JSON.stringify({ database, schemas: grouped }, null, 2);\n} catch (e) {\n  return JSON.stringify({ error: e.message, database });\n}",
+        "specifyInputSchema": true,
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"database\":{\"type\":\"string\",\"description\":\"Database file path: /data/source.duckdb or /data/vault.duckdb\"}},\"required\":[\"database\"]}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        560
+      ],
+      "id": "mcp0000-0000-4000-8000-000000000003",
+      "name": "describe_schema"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Send a natural language question about inventory to the Dispatcher agent. The agent will query source data, build Data Vault tables if needed, and return structured results including the mart data, routing decision, and any data quality issues.",
+        "method": "POST",
+        "url": "http://n8n:5678/webhook/dispatcher",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"user_request\": \"{question}\"}",
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "question",
+              "description": "A natural language inventory question, e.g. Which products are below safety stock? or Show me purchase orders by vendor.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        300,
+        560
+      ],
+      "id": "mcp0000-0000-4000-8000-000000000004",
+      "name": "ask_inventory_question"
+    }
+  ],
+  "connections": {
+    "run_query": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "describe_schema": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ask_inventory_question": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "staticData": null
+}

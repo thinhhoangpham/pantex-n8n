@@ -1,0 +1,209 @@
+{
+  "database": "/data/source.duckdb",
+  "source_systems": [
+    {
+      "system": "ERP",
+      "description": "Enterprise Resource Planning system. The source of truth for what products exist, how many are in stock, and what is being manufactured. Based on the AdventureWorks dataset representing a fictional bicycle manufacturer.",
+      "schema": "erp",
+      "tables": [
+        {
+          "name": "products",
+          "full_ref": "erp.products",
+          "description": "Product master catalog. Every item the company manufactures, sells, or stocks has one row here. This is the central table that connects all three source systems through product_id.",
+          "row_count": 504,
+          "primary_key": ["product_id"],
+          "foreign_keys": [],
+          "columns": [
+            {"name": "product_id", "type": "VARCHAR", "description": "Unique identifier for the product (e.g. '707'). Primary key. Referenced by erp.inventory_levels, erp.work_orders, procurement.po_lines, and wms.stock_movements."},
+            {"name": "product_name", "type": "VARCHAR", "description": "Full descriptive name of the product (e.g. 'Sport-100 Helmet, Red')"},
+            {"name": "sku", "type": "VARCHAR", "description": "Stock Keeping Unit code — short alphanumeric code used in day-to-day operations (e.g. 'HL-U509-R')"},
+            {"name": "unit_cost", "type": "DECIMAL(12,2)", "description": "Cost to manufacture this product, in US dollars"},
+            {"name": "list_price", "type": "DECIMAL(12,2)", "description": "Price charged to customers, in US dollars"},
+            {"name": "safety_stock", "type": "INTEGER", "description": "Minimum quantity that must be on hand before triggering a restock alert"},
+            {"name": "reorder_point", "type": "INTEGER", "description": "Stock level at which a new production or purchase order should be created"},
+            {"name": "product_line", "type": "VARCHAR", "description": "Product family code: R=Road bikes, M=Mountain bikes, T=Touring bikes, S=Standard/other"},
+            {"name": "product_class", "type": "VARCHAR", "description": "Quality tier: H=High, M=Medium, L=Low"},
+            {"name": "size", "type": "VARCHAR", "description": "Physical size (e.g. '58', 'L', 'XL'). Blank if not applicable."},
+            {"name": "weight_lbs", "type": "VARCHAR", "description": "Weight in pounds. Blank if not applicable."}
+          ]
+        },
+        {
+          "name": "inventory_levels",
+          "full_ref": "erp.inventory_levels",
+          "description": "Current stock on hand. Shows how many units of each product are at each specific shelf and bin within a warehouse location. One row per unique product + location + shelf + bin combination.",
+          "row_count": 1069,
+          "primary_key": ["product_id", "location_id", "shelf", "bin"],
+          "foreign_keys": [
+            {"column": "product_id", "references": "erp.products.product_id"},
+            {"column": "location_id", "references": "erp.locations.location_id"}
+          ],
+          "columns": [
+            {"name": "product_id", "type": "VARCHAR", "description": "FK — links to erp.products.product_id. Identifies which product is stocked here."},
+            {"name": "location_id", "type": "VARCHAR", "description": "FK — links to erp.locations.location_id. Identifies where this stock is held."},
+            {"name": "shelf", "type": "VARCHAR", "description": "Shelf label within the location (e.g. 'A', 'B')"},
+            {"name": "bin", "type": "VARCHAR", "description": "Bin number within the shelf — a specific slot or container (e.g. '1', '2')"},
+            {"name": "qty_on_hand", "type": "INTEGER", "description": "Number of units currently in this location"},
+            {"name": "last_updated", "type": "DATE", "description": "Date this stock count was last recorded or updated"}
+          ]
+        },
+        {
+          "name": "locations",
+          "full_ref": "erp.locations",
+          "description": "Warehouse and production floor locations where inventory can be held. Referenced by both erp.inventory_levels and wms.stock_movements.",
+          "row_count": 14,
+          "primary_key": ["location_id"],
+          "foreign_keys": [],
+          "columns": [
+            {"name": "location_id", "type": "VARCHAR", "description": "Unique identifier for the location. Primary key. Referenced by erp.inventory_levels and wms.stock_movements."},
+            {"name": "location_name", "type": "VARCHAR", "description": "Human-readable name (e.g. 'Tool Crib', 'Finished Goods Storage', 'Frame Forming')"},
+            {"name": "cost_rate", "type": "DECIMAL(8,2)", "description": "Hourly operating cost for this location, in US dollars per hour"},
+            {"name": "capacity", "type": "DECIMAL(8,2)", "description": "Available working capacity in hours per week"}
+          ]
+        },
+        {
+          "name": "work_orders",
+          "full_ref": "erp.work_orders",
+          "description": "Production work orders. Each row is an instruction to the factory floor to manufacture a given quantity of a product by a deadline. Tracks the full lifecycle from start to completion.",
+          "row_count": 72591,
+          "primary_key": ["wo_id"],
+          "foreign_keys": [
+            {"column": "product_id", "references": "erp.products.product_id"}
+          ],
+          "columns": [
+            {"name": "wo_id", "type": "VARCHAR", "description": "Unique work order identifier. Primary key."},
+            {"name": "product_id", "type": "VARCHAR", "description": "FK — links to erp.products.product_id. Identifies which product is being manufactured."},
+            {"name": "qty_required", "type": "INTEGER", "description": "Number of units ordered to be produced"},
+            {"name": "qty_stocked", "type": "INTEGER", "description": "Number of units completed and moved into stock"},
+            {"name": "qty_scrapped", "type": "INTEGER", "description": "Number of units rejected or discarded during production"},
+            {"name": "start_date", "type": "DATE", "description": "Date production actually began (or was planned to begin)"},
+            {"name": "end_date", "type": "DATE", "description": "Date production actually finished"},
+            {"name": "due_date", "type": "DATE", "description": "Deadline by which the order must be completed"}
+          ]
+        }
+      ]
+    },
+    {
+      "system": "Procurement",
+      "description": "Procurement system. Manages purchasing goods from external suppliers — the approved vendor list, purchase orders, and the individual line items on each order. Based on the AdventureWorks dataset.",
+      "schema": "procurement",
+      "tables": [
+        {
+          "name": "vendors",
+          "full_ref": "procurement.vendors",
+          "description": "Approved supplier list. Only vendors on this list are authorized to receive purchase orders from the company.",
+          "row_count": 104,
+          "primary_key": ["vendor_id"],
+          "foreign_keys": [],
+          "columns": [
+            {"name": "vendor_id", "type": "VARCHAR", "description": "Unique identifier for the vendor. Primary key. Referenced by procurement.purchase_orders."},
+            {"name": "account_number", "type": "VARCHAR", "description": "The company's internal account number assigned to this vendor"},
+            {"name": "vendor_name", "type": "VARCHAR", "description": "The vendor's company name"},
+            {"name": "credit_rating", "type": "INTEGER", "description": "Credit rating from 1 to 5: 1=Superior, 2=Excellent, 3=Above Average, 4=Average, 5=Below Average"},
+            {"name": "is_active", "type": "BOOLEAN", "description": "True if the vendor is currently authorized to receive purchase orders"},
+            {"name": "is_preferred", "type": "BOOLEAN", "description": "True if the vendor has preferred status (better terms, priority ordering)"},
+            {"name": "last_updated", "type": "DATE", "description": "Date the vendor record was last modified"}
+          ]
+        },
+        {
+          "name": "purchase_orders",
+          "full_ref": "procurement.purchase_orders",
+          "description": "Purchase order headers. Each row represents one PO — the top-level agreement to buy goods from a vendor. Line-item details are in procurement.po_lines.",
+          "row_count": 4012,
+          "primary_key": ["po_id"],
+          "foreign_keys": [
+            {"column": "vendor_id", "references": "procurement.vendors.vendor_id"}
+          ],
+          "columns": [
+            {"name": "po_id", "type": "VARCHAR", "description": "Unique Purchase Order identifier. Primary key. Referenced by procurement.po_lines."},
+            {"name": "vendor_id", "type": "VARCHAR", "description": "FK — links to procurement.vendors.vendor_id. Identifies which vendor this PO was sent to."},
+            {"name": "status", "type": "VARCHAR", "description": "Current state as text: PENDING (created), APPROVED (authorized), REJECTED (denied), COMPLETE (fulfilled)"},
+            {"name": "status_code", "type": "INTEGER", "description": "Numeric version of status: 1=PENDING, 2=APPROVED, 3=REJECTED, 4=COMPLETE"},
+            {"name": "order_date", "type": "DATE", "description": "Date the PO was created"},
+            {"name": "ship_date", "type": "DATE", "description": "Date the goods were shipped by the vendor"},
+            {"name": "subtotal", "type": "DECIMAL(12,2)", "description": "Order value before tax, in US dollars"},
+            {"name": "tax_amount", "type": "DECIMAL(12,2)", "description": "Tax charged on this order, in US dollars"},
+            {"name": "total_due", "type": "DECIMAL(12,2)", "description": "Total amount owed to the vendor including tax, in US dollars"}
+          ]
+        },
+        {
+          "name": "po_lines",
+          "full_ref": "procurement.po_lines",
+          "description": "Purchase order line items. Each PO can cover multiple products. One row per product per PO. Records what was ordered, at what price, and how much was received, rejected, and accepted into stock.",
+          "row_count": 8845,
+          "primary_key": ["line_id"],
+          "foreign_keys": [
+            {"column": "po_id", "references": "procurement.purchase_orders.po_id"},
+            {"column": "product_id", "references": "erp.products.product_id"}
+          ],
+          "columns": [
+            {"name": "po_id", "type": "VARCHAR", "description": "FK — links to procurement.purchase_orders.po_id. Identifies which PO this line belongs to."},
+            {"name": "line_id", "type": "VARCHAR", "description": "Unique identifier for this individual line within the PO. Primary key."},
+            {"name": "product_id", "type": "VARCHAR", "description": "FK — links to erp.products.product_id. Identifies which product was ordered. Cross-schema FK."},
+            {"name": "qty_ordered", "type": "INTEGER", "description": "Number of units ordered on this line"},
+            {"name": "unit_price", "type": "DECIMAL(12,2)", "description": "Agreed price per unit for this order, in US dollars"},
+            {"name": "qty_received", "type": "DECIMAL(12,3)", "description": "Number of units physically received from the vendor"},
+            {"name": "qty_rejected", "type": "DECIMAL(12,3)", "description": "Number of received units that failed inspection and were rejected"},
+            {"name": "qty_stocked", "type": "DECIMAL(12,3)", "description": "Number of units that passed inspection and were accepted into stock"},
+            {"name": "due_date", "type": "DATE", "description": "Date by which delivery was expected"}
+          ]
+        }
+      ]
+    },
+    {
+      "system": "WMS",
+      "description": "Warehouse Management System. Tracks the physical movement of stock in and out of warehouses — receipts, shipments, and manual adjustments. This schema is fully synthetic (generated data, not from AdventureWorks).",
+      "schema": "wms",
+      "tables": [
+        {
+          "name": "warehouses",
+          "full_ref": "wms.warehouses",
+          "description": "Physical warehouse facilities the company operates. Reference table for high-level location context (distinct from erp.locations which tracks production floor locations).",
+          "row_count": 4,
+          "primary_key": ["warehouse_id"],
+          "foreign_keys": [],
+          "columns": [
+            {"name": "warehouse_id", "type": "VARCHAR", "description": "Unique identifier for the warehouse (e.g. 'WH-EAST'). Primary key."},
+            {"name": "warehouse_name", "type": "VARCHAR", "description": "Descriptive name (e.g. 'East Distribution Center')"},
+            {"name": "city", "type": "VARCHAR", "description": "City and state where the warehouse is located"},
+            {"name": "capacity_sqft", "type": "INTEGER", "description": "Total floor area of the warehouse in square feet"}
+          ]
+        },
+        {
+          "name": "stock_movements",
+          "full_ref": "wms.stock_movements",
+          "description": "Log of every inventory movement event — goods received from a vendor, shipped to a customer, or adjusted due to a count correction. One row per movement event. Generated using product and location combinations from erp.inventory_levels.",
+          "row_count": 500,
+          "primary_key": ["movement_id"],
+          "foreign_keys": [
+            {"column": "product_id", "references": "erp.products.product_id"},
+            {"column": "location_id", "references": "erp.locations.location_id"}
+          ],
+          "columns": [
+            {"name": "movement_id", "type": "VARCHAR", "description": "Unique identifier for this movement event. Primary key."},
+            {"name": "product_id", "type": "VARCHAR", "description": "FK — links to erp.products.product_id. Identifies which product moved. Cross-schema FK."},
+            {"name": "location_id", "type": "VARCHAR", "description": "FK — links to erp.locations.location_id. Identifies which warehouse location the product moved to or from. Cross-schema FK."},
+            {"name": "movement_type", "type": "VARCHAR", "description": "Kind of movement: RECEIPT (goods arrived from a vendor), SHIPMENT (goods sent out to a customer), ADJUSTMENT (manual correction to stock count)"},
+            {"name": "quantity", "type": "INTEGER", "description": "Number of units involved in this movement"},
+            {"name": "movement_date", "type": "DATE", "description": "Date the movement occurred"},
+            {"name": "reference_doc", "type": "VARCHAR", "description": "Document that authorized or triggered this movement (e.g. a PO number or shipment ID)"}
+          ]
+        }
+      ]
+    }
+  ],
+  "cross_schema_relationships": [
+    {"from": "erp.inventory_levels.product_id", "to": "erp.products.product_id"},
+    {"from": "erp.inventory_levels.location_id", "to": "erp.locations.location_id"},
+    {"from": "erp.work_orders.product_id", "to": "erp.products.product_id"},
+    {"from": "procurement.purchase_orders.vendor_id", "to": "procurement.vendors.vendor_id"},
+    {"from": "procurement.po_lines.po_id", "to": "procurement.purchase_orders.po_id"},
+    {"from": "procurement.po_lines.product_id", "to": "erp.products.product_id"},
+    {"from": "wms.stock_movements.product_id", "to": "erp.products.product_id"},
+    {"from": "wms.stock_movements.location_id", "to": "erp.locations.location_id"}
+  ],
+  "notes": {
+    "central_table": "erp.products is the central table — it connects all three schemas through product_id",
+    "location_note": "erp.locations covers production floor locations. wms.warehouses covers distribution center facilities. Both are referenced by wms.stock_movements via location_id.",
+    "data_origin": "erp and procurement schemas use AdventureWorks data with renamed columns. wms schema is fully synthetic."
+  }
+}
