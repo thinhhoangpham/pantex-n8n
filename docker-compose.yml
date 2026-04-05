@@ -8,6 +8,8 @@ services:
       - ./data:/data
     environment:
       - N8N_RESTRICT_FILE_ACCESS_TO=/data
+      - N8N_SECURE_COOKIE=false
+      - N8N_MCP_ALLOWED_ORIGINS=*
     networks:
       - pmis_net
     restart: unless-stopped

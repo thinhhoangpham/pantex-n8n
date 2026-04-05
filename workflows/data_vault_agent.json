@@ -1,11 +1,7 @@
 {
-  "updatedAt": "2026-03-27T04:03:56.655Z",
-  "createdAt": "2026-03-22T15:54:23.958Z",
   "id": "26bHrzBpfG5WS12G",
   "name": "Data Vault Agent",
-  "description": null,
   "active": true,
-  "isArchived": false,
   "nodes": [
     {
       "parameters": {
@@ -41,7 +37,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Get webhook body\nconst webhookData = $('Webhook').first().json.body;\n\n// Get dv2 rules from file\nconst fileData = $input.first().json;\nlet dv2Rules;\ntry {\n  // The file content comes as binary data, need to parse it\n  if (fileData.data) {\n    dv2Rules = JSON.parse(Buffer.from(fileData.data, 'base64').toString('utf-8'));\n  } else if (fileData.json) {\n    dv2Rules = typeof fileData.json === 'string' ? JSON.parse(fileData.json) : fileData.json;\n  } else {\n    dv2Rules = fileData;\n  }\n} catch (e) {\n  dv2Rules = fileData;\n}\n\nreturn {\n  json: {\n    staging_tables: webhookData.staging_tables,\n    vault_tables_to_create: webhookData.vault_tables_to_create,\n    existing_vault_tables: webhookData.existing_vault_tables || [],\n    business_keys: webhookData.business_keys || [],\n    dv2_rules: dv2Rules\n  }\n};"
+        "jsCode": "// Get webhook body\nconst webhookData = $('Webhook').first().json.body;\n\n// Get dv2 rules from file\nconst fileData = $input.first().json;\nlet dv2Rules;\ntry {\n  // The file content comes as binary data, need to parse it\n  if (fileData.data) {\n    dv2Rules = JSON.parse(Buffer.from(fileData.data, 'base64').toString('utf-8'));\n  } else if (fileData.json) {\n    dv2Rules = typeof fileData.json === 'string' ? JSON.parse(fileData.json) : fileData.json;\n  } else {\n    dv2Rules = fileData;\n  }\n} catch (e) {\n  dv2Rules = fileData;\n}\n\nreturn {\n  json: {\n    staging_tables: webhookData.staging_tables,\n    vault_tables_to_create: webhookData.vault_tables_to_create,\n    existing_vault_tables: webhookData.existing_vault_tables || [],\n    business_keys: webhookData.business_keys || [],\n    vault_registry: webhookData.vault_registry || [],\n    mart_registry: webhookData.mart_registry || [],\n    dv2_rules: dv2Rules\n  }\n};"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -55,11 +51,11 @@
     {
       "parameters": {
         "promptType": "define",
-        "text": "=Generate Data Vault 2.0 DDL and load SQL for the following request.\n\nSTAGING TABLES (extracted source data):\n{{ JSON.stringify($json.staging_tables, null, 2) }}\n\nVAULT TABLES TO CREATE:\n{{ JSON.stringify($json.vault_tables_to_create) }}\n\nEXISTING VAULT TABLES (do not recreate these):\n{{ JSON.stringify($json.existing_vault_tables) }}\n\nBUSINESS KEYS:\n{{ JSON.stringify($json.business_keys) }}\n\nDV2 RULES:\n{{ JSON.stringify($json.dv2_rules, null, 2) }}",
+        "text": "=Generate Data Vault 2.0 DDL and load SQL for the following request.\n\nSTAGING TABLES (extracted source data):\n{{ JSON.stringify($json.staging_tables, null, 2) }}\n\nVAULT TABLES TO CREATE:\n{{ JSON.stringify($json.vault_tables_to_create) }}\n\nEXISTING VAULT TABLES (do not recreate these):\n{{ JSON.stringify($json.existing_vault_tables) }}\n\nBUSINESS KEYS:\n{{ JSON.stringify($json.business_keys) }}\n\nDV2 RULES:\n{{ JSON.stringify($json.dv2_rules, null, 2) }}\n\nVAULT REGISTRY (existing vault table metadata):\n{{ JSON.stringify($json.vault_registry, null, 2) }}\n\nMART REGISTRY (existing mart table metadata):\n{{ JSON.stringify($json.mart_registry, null, 2) }}",
         "messages": {
           "messageValues": [
             {
-              "message": "You are a Data Vault 2.0 modeling agent for an inventory data system.\n\nYou receive staging table schemas (stg_* tables containing extracted source data), a list of vault tables to create, and DV2 modeling rules. Your job is to generate DDL (CREATE TABLE) and load SQL (INSERT...SELECT) for each requested vault table.\n\nIMPORTANT RULES:\n1. Follow the DV2 rules provided exactly — prefixes, suffixes, hash algorithm, required columns.\n2. Use CREATE TABLE IF NOT EXISTS for all DDL.\n3. Source data has been pre-extracted into staging tables with the naming convention stg_<schema>_<table> (e.g., stg_erp_products, stg_procurement_vendors). Your load SQL MUST SELECT from these staging tables. NEVER reference the original source schemas (erp.*, procurement.*, wms.*) in your load SQL.\n4. Vault tables go in the main schema (no prefix).\n5. Hub loads: INSERT only rows whose business key does not already exist (use WHERE NOT EXISTS).\n6. Link loads: INSERT only rows whose combined hash key does not already exist.\n7. Satellite loads: INSERT new versions of changed records. Use hashdiff to detect changes.\n8. Hash expression: md5(UPPER(TRIM(CAST(column AS VARCHAR))))\n9. Composite hash: md5(UPPER(TRIM(CAST(col1 AS VARCHAR))) || '|' || UPPER(TRIM(CAST(col2 AS VARCHAR))))\n10. IMPORTANT DuckDB rule for hashdiff: When computing hashdiff with COALESCE, always CAST non-VARCHAR columns to VARCHAR first. DuckDB cannot implicitly convert '' to numeric types.\n    WRONG: COALESCE(unit_cost, '')\n    RIGHT: COALESCE(CAST(unit_cost AS VARCHAR), '')\n    Apply this to every column in hashdiff concatenations that is not already VARCHAR (e.g. DECIMAL, INTEGER, FLOAT, DATE, TIMESTAMP, BOOLEAN).\n11. Do NOT create tables listed in existing_vault_tables.\n12. Order output: hubs first, then links, then satellites.\n13. One hub per entity: each hub represents exactly one business entity. If you need to track a relationship between two entities (e.g. product + location), create a link table — NOT a composite hub.\n14. Satellite parent matching: every satellite's parent hash key column (e.g. h_product_key in sat_product_details) MUST reference a hub or link that exists in this request or in existing_vault_tables. If the parent table doesn't exist, create it.\n15. Consistent hash keys: the hash key column name in a satellite MUST exactly match the primary hash key column name of its parent hub or link. For example, sat_product_details must use product_hk (matching hub_product's PK), not h_product_key or any other variant.\n16. Hub column naming per DV2 rules: hub hash key = <entity>_hk (VARCHAR(32)), business key = <entity>_bk (VARCHAR). Example: hub_product has product_hk, product_bk. Do NOT use non-standard names like h_inventory_key or product_id as column names in hubs.\n\nRespond ONLY with valid JSON (no markdown code fences):\n{\n  \"vault_tables\": [\n    {\n      \"table_name\": \"hub_product\",\n      \"table_type\": \"HUB\",\n      \"ddl\": \"CREATE TABLE IF NOT EXISTS hub_product (product_hk VARCHAR(32) PRIMARY KEY, product_bk VARCHAR NOT NULL, load_dts TIMESTAMP DEFAULT CURRENT_TIMESTAMP, record_source VARCHAR NOT NULL)\",\n      \"load_sql\": \"INSERT INTO hub_product SELECT ... FROM stg_erp_products WHERE NOT EXISTS ...\"\n    },\n    {\n      \"table_name\": \"sat_product_details\",\n      \"table_type\": \"SATELLITE\",\n      \"ddl\": \"CREATE TABLE IF NOT EXISTS sat_product_details (product_hk VARCHAR(32), load_dts TIMESTAMP, load_end_dts TIMESTAMP, record_source VARCHAR, hashdiff VARCHAR(32), product_name VARCHAR, ...)\",\n      \"load_sql\": \"INSERT INTO sat_product_details SELECT ... FROM stg_erp_products ...\"\n    }\n  ]\n}"
+              "message": "You are a Data Vault 2.0 code generator. You receive staging table schemas and a list of vault tables to create. Generate DDL and load SQL by following the EXACT templates below. Do not deviate.\n\nGENERAL RULES:\n- Use CREATE TABLE IF NOT EXISTS for all DDL.\n- Load SQL must SELECT from stg_* staging tables only. NEVER reference erp.*, procurement.*, wms.*.\n- Do NOT create tables listed in existing_vault_tables.\n- Output order: hubs first, then links, then satellites.\n- Use DuckDB SQL syntax.\n\nNAMING:\n- Hub hash key: <entity>_hk (e.g. product_hk)\n- Hub business key: <entity>_bk (e.g. product_bk)\n- Link hash key: <entity1>_<entity2>_hk (e.g. product_location_hk)\n- Link foreign keys: exact hub hash key names (product_hk, location_hk)\n- Satellite parent key: EXACT SAME name as parent hub/link PK\n\nHASH FUNCTION: md5(UPPER(TRIM(CAST(col AS VARCHAR))))\nCOMPOSITE HASH: md5(UPPER(TRIM(CAST(col1 AS VARCHAR))) || '|' || UPPER(TRIM(CAST(col2 AS VARCHAR))))\n\n========== HUB TEMPLATE ==========\nDDL:\nCREATE TABLE IF NOT EXISTS hub_<entity> (\n  <entity>_hk VARCHAR(32) PRIMARY KEY,\n  <entity>_bk VARCHAR NOT NULL,\n  load_dts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n  record_source VARCHAR NOT NULL\n)\n\nLOAD SQL:\nINSERT INTO hub_<entity>\nSELECT DISTINCT\n  md5(UPPER(TRIM(CAST(<bk_column> AS VARCHAR)))) AS <entity>_hk,\n  CAST(<bk_column> AS VARCHAR) AS <entity>_bk,\n  CURRENT_TIMESTAMP AS load_dts,\n  '<source>' AS record_source\nFROM <stg_table>\nWHERE NOT EXISTS (\n  SELECT 1 FROM hub_<entity> h\n  WHERE h.<entity>_bk = CAST(<stg_table>.<bk_column> AS VARCHAR)\n)\n\n========== LINK TEMPLATE ==========\nDDL:\nCREATE TABLE IF NOT EXISTS lnk_<e1>_<e2> (\n  <e1>_<e2>_hk VARCHAR(32) PRIMARY KEY,\n  <e1>_hk VARCHAR(32) NOT NULL,\n  <e2>_hk VARCHAR(32) NOT NULL,\n  load_dts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n  record_source VARCHAR NOT NULL\n)\n\nLOAD SQL (MUST use SELECT DISTINCT):\nINSERT INTO lnk_<e1>_<e2>\nSELECT DISTINCT\n  md5(UPPER(TRIM(CAST(<bk1> AS VARCHAR))) || '|' || UPPER(TRIM(CAST(<bk2> AS VARCHAR)))) AS <e1>_<e2>_hk,\n  md5(UPPER(TRIM(CAST(<bk1> AS VARCHAR)))) AS <e1>_hk,\n  md5(UPPER(TRIM(CAST(<bk2> AS VARCHAR)))) AS <e2>_hk,\n  CURRENT_TIMESTAMP AS load_dts,\n  '<source>' AS record_source\nFROM <stg_table(s) with JOINs if needed>\nWHERE NOT EXISTS (\n  SELECT 1 FROM lnk_<e1>_<e2> l\n  WHERE l.<e1>_<e2>_hk = md5(UPPER(TRIM(CAST(<bk1> AS VARCHAR))) || '|' || UPPER(TRIM(CAST(<bk2> AS VARCHAR))))\n)\n\n========== SATELLITE TEMPLATE ==========\nDDL:\nCREATE TABLE IF NOT EXISTS sat_<name> (\n  <parent_hk> VARCHAR(32) NOT NULL,\n  load_dts TIMESTAMP NOT NULL,\n  load_end_dts TIMESTAMP,\n  record_source VARCHAR NOT NULL,\n  hashdiff VARCHAR(32) NOT NULL,\n  <attr1> <type1>,\n  <attr2> <type2>,\n  ...\n)\n\nLOAD SQL (MUST use SELECT DISTINCT):\nINSERT INTO sat_<name>\nSELECT DISTINCT\n  md5(UPPER(TRIM(CAST(<bk_column> AS VARCHAR)))) AS <parent_hk>,\n  CURRENT_TIMESTAMP AS load_dts,\n  NULL AS load_end_dts,\n  '<source>' AS record_source,\n  md5(\n    UPPER(TRIM(COALESCE(CAST(<attr1> AS VARCHAR), '')))\n    || '|' || UPPER(TRIM(COALESCE(CAST(<attr2> AS VARCHAR), '')))\n    || '|' || ...\n  ) AS hashdiff,\n  s.<attr1>,\n  s.<attr2>,\n  ...\nFROM <stg_table> s\nWHERE NOT EXISTS (\n  SELECT 1 FROM sat_<name> sat\n  WHERE sat.<parent_hk> = md5(UPPER(TRIM(CAST(s.<bk_column> AS VARCHAR))))\n  AND sat.hashdiff = md5(\n    UPPER(TRIM(COALESCE(CAST(s.<attr1> AS VARCHAR), '')))\n    || '|' || UPPER(TRIM(COALESCE(CAST(s.<attr2> AS VARCHAR), '')))\n    || '|' || ...\n  )\n  AND sat.load_end_dts IS NULL\n)\n\nWHAT IS HASHDIFF:\nhashdiff is an md5 hash of ALL satellite attribute values, used to detect data changes. When new source data arrives, compare the new hashdiff against the current one — if different, the data changed. Because it is an md5 hash, every value MUST be a string before concatenation.\n\nHASHDIFF RULE:\nEVERY attribute in hashdiff MUST use this exact pattern:\n  UPPER(TRIM(COALESCE(CAST(col AS VARCHAR), '')))\nCAST to VARCHAR first, then COALESCE to handle NULLs. This works for ALL column types. NEVER use COALESCE(col, '') directly — DuckDB cannot cast '' to INTEGER/BIGINT.\n\nThe hashdiff expression in the INSERT SELECT and the WHERE NOT EXISTS subquery MUST be identical.\n\nVAULT/MART REGISTRY USAGE:\nCheck the VAULT REGISTRY to understand existing table structures. If a satellite's source data has grain that spans multiple entities (e.g. one row per product per location), the satellite MUST parent to the link table connecting those entities, not to a single hub. Use hub_keys in the registry to identify which links connect which entities.\n\nRespond ONLY with valid JSON (no markdown code fences):\n{\"vault_tables\":[{\"table_name\":\"hub_...\",\"table_type\":\"HUB\",\"ddl\":\"CREATE TABLE IF NOT EXISTS ...\",\"load_sql\":\"INSERT INTO ...\"}]}"
             }
           ]
         },
@@ -102,7 +98,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const llmOutput = $input.first().json.text;\n\nlet parsed;\ntry {\n  parsed = JSON.parse(llmOutput);\n} catch (e) {\n  // Try to extract JSON from markdown code fences (complete or unclosed)\n  let jsonStr = llmOutput;\n  const fenceMatch = llmOutput.match(/```(?:json)?\\s*([\\s\\S]*?)```/);\n  if (fenceMatch) {\n    jsonStr = fenceMatch[1].trim();\n  } else if (llmOutput.startsWith('```')) {\n    // Unclosed fence (truncated output) — strip opening fence\n    jsonStr = llmOutput.replace(/^```(?:json)?\\s*/, '').trim();\n  }\n\n  try {\n    parsed = JSON.parse(jsonStr);\n  } catch (e2) {\n    // Attempt to recover truncated JSON by closing open structures\n    let recovered = jsonStr;\n    // If truncated mid-string, close the string\n    const quoteCount = (recovered.match(/(?<!\\\\)\"/g) || []).length;\n    if (quoteCount % 2 !== 0) recovered += '\"';\n    // Close any open braces/brackets\n    const opens = (recovered.match(/[{\\[]/g) || []).length;\n    const closes = (recovered.match(/[}\\]]/g) || []).length;\n    // Add missing closing brackets/braces\n    for (let i = 0; i < opens - closes; i++) {\n      // Determine if we need ] or } by scanning backwards for the last unmatched opener\n      const stack = [];\n      for (const ch of recovered) {\n        if (ch === '{' || ch === '[') stack.push(ch);\n        else if (ch === '}' || ch === ']') stack.pop();\n      }\n      if (stack.length > 0) {\n        const last = stack.pop();\n        recovered += last === '{' ? '}' : ']';\n      }\n    }\n    try {\n      parsed = JSON.parse(recovered);\n    } catch (e3) {\n      throw new Error('Could not parse LLM output as JSON: ' + llmOutput.substring(0, 300));\n    }\n  }\n}\n\n// Validate structure\nif (!parsed.vault_tables || !Array.isArray(parsed.vault_tables)) {\n  throw new Error('LLM output missing vault_tables array');\n}\n\nfor (const table of parsed.vault_tables) {\n  if (!table.table_name || !table.table_type || !table.ddl || !table.load_sql) {\n    throw new Error('Vault table entry missing required fields: ' + JSON.stringify(table).substring(0, 200));\n  }\n}\n\nreturn {\n  json: {\n    status: 'success',\n    vault_tables: parsed.vault_tables\n  }\n};"
+        "jsCode": "const llmOutput = $input.first().json.text;\n\nlet parsed;\ntry {\n  parsed = JSON.parse(llmOutput);\n} catch (e) {\n  // Try to extract JSON from markdown code fences (complete or unclosed)\n  let jsonStr = llmOutput;\n  const fenceMatch = llmOutput.match(/```(?:json)?\\s*([\\s\\S]*?)```/);\n  if (fenceMatch) {\n    jsonStr = fenceMatch[1].trim();\n  } else if (llmOutput.startsWith('```')) {\n    // Unclosed fence (truncated output) \u2014 strip opening fence\n    jsonStr = llmOutput.replace(/^```(?:json)?\\s*/, '').trim();\n  }\n\n  try {\n    parsed = JSON.parse(jsonStr);\n  } catch (e2) {\n    // Attempt to recover truncated JSON by closing open structures\n    let recovered = jsonStr;\n    // If truncated mid-string, close the string\n    const quoteCount = (recovered.match(/(?<!\\\\)\"/g) || []).length;\n    if (quoteCount % 2 !== 0) recovered += '\"';\n    // Close any open braces/brackets\n    const opens = (recovered.match(/[{\\[]/g) || []).length;\n    const closes = (recovered.match(/[}\\]]/g) || []).length;\n    // Add missing closing brackets/braces\n    for (let i = 0; i < opens - closes; i++) {\n      // Determine if we need ] or } by scanning backwards for the last unmatched opener\n      const stack = [];\n      for (const ch of recovered) {\n        if (ch === '{' || ch === '[') stack.push(ch);\n        else if (ch === '}' || ch === ']') stack.pop();\n      }\n      if (stack.length > 0) {\n        const last = stack.pop();\n        recovered += last === '{' ? '}' : ']';\n      }\n    }\n    try {\n      parsed = JSON.parse(recovered);\n    } catch (e3) {\n      throw new Error('Could not parse LLM output as JSON: ' + llmOutput.substring(0, 300));\n    }\n  }\n}\n\n// Validate structure\nif (!parsed.vault_tables || !Array.isArray(parsed.vault_tables)) {\n  throw new Error('LLM output missing vault_tables array');\n}\n\nfor (const table of parsed.vault_tables) {\n  if (!table.table_name || !table.table_type || !table.ddl || !table.load_sql) {\n    throw new Error('Vault table entry missing required fields: ' + JSON.stringify(table).substring(0, 200));\n  }\n}\n\nreturn {\n  json: {\n    status: 'success',\n    vault_tables: parsed.vault_tables\n  }\n};"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -201,251 +197,5 @@
     "executionOrder": "v1",
     "callerPolicy": "workflowsFromSameOwner",
     "availableInMCP": false
-  },
-  "staticData": null,
-  "meta": null,
-  "pinData": {},
-  "versionId": "172f961c-da62-4665-9ac7-c9a2f9bd8834",
-  "activeVersionId": "172f961c-da62-4665-9ac7-c9a2f9bd8834",
-  "versionCounter": 23,
-  "triggerCount": 1,
-  "shared": [
-    {
-      "updatedAt": "2026-03-22T15:54:23.962Z",
-      "createdAt": "2026-03-22T15:54:23.962Z",
-      "role": "workflow:owner",
-      "workflowId": "26bHrzBpfG5WS12G",
-      "projectId": "eubhCi2tBHtd3cvz",
-      "project": {
-        "updatedAt": "2026-03-15T03:56:59.837Z",
-        "createdAt": "2026-02-23T22:46:53.069Z",
-        "id": "eubhCi2tBHtd3cvz",
-        "name": "Thinh Pham <hoangthinh.pham@gmail.com>",
-        "type": "personal",
-        "icon": null,
-        "description": null,
-        "creatorId": "4d308f1a-e8cd-468b-bae5-ac7bc92538cc"
-      }
-    }
-  ],
-  "tags": [],
-  "activeVersion": {
-    "updatedAt": "2026-03-27T04:03:56.658Z",
-    "createdAt": "2026-03-27T04:03:56.658Z",
-    "versionId": "172f961c-da62-4665-9ac7-c9a2f9bd8834",
-    "workflowId": "26bHrzBpfG5WS12G",
-    "nodes": [
-      {
-        "parameters": {
-          "httpMethod": "POST",
-          "path": "data-vault-agent",
-          "responseMode": "responseNode",
-          "options": {}
-        },
-        "type": "n8n-nodes-base.webhook",
-        "typeVersion": 2.1,
-        "position": [
-          0,
-          300
-        ],
-        "id": "dv01a1b2-c3d4-e5f6-a7b8-c9d0e1f2a3b4",
-        "name": "Webhook",
-        "webhookId": "data-vault-agent-webhook-id"
-      },
-      {
-        "parameters": {
-          "operation": "read",
-          "fileSelector": "/data/metadata/dv2_rules.json",
-          "options": {}
-        },
-        "type": "n8n-nodes-base.readWriteFile",
-        "typeVersion": 1.1,
-        "position": [
-          250,
-          300
-        ],
-        "id": "dv02b2c3-d4e5-f6a7-b8c9-d0e1f2a3b4c5",
-        "name": "Read File"
-      },
-      {
-        "parameters": {
-          "jsCode": "// Get webhook body\nconst webhookData = $('Webhook').first().json.body;\n\n// Get dv2 rules from file\nconst fileData = $input.first().json;\nlet dv2Rules;\ntry {\n  // The file content comes as binary data, need to parse it\n  if (fileData.data) {\n    dv2Rules = JSON.parse(Buffer.from(fileData.data, 'base64').toString('utf-8'));\n  } else if (fileData.json) {\n    dv2Rules = typeof fileData.json === 'string' ? JSON.parse(fileData.json) : fileData.json;\n  } else {\n    dv2Rules = fileData;\n  }\n} catch (e) {\n  dv2Rules = fileData;\n}\n\nreturn {\n  json: {\n    staging_tables: webhookData.staging_tables,\n    vault_tables_to_create: webhookData.vault_tables_to_create,\n    existing_vault_tables: webhookData.existing_vault_tables || [],\n    business_keys: webhookData.business_keys || [],\n    dv2_rules: dv2Rules\n  }\n};"
-        },
-        "type": "n8n-nodes-base.code",
-        "typeVersion": 2,
-        "position": [
-          500,
-          300
-        ],
-        "id": "dv03c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d6",
-        "name": "Merge Context"
-      },
-      {
-        "parameters": {
-          "promptType": "define",
-          "text": "=Generate Data Vault 2.0 DDL and load SQL for the following request.\n\nSTAGING TABLES (extracted source data):\n{{ JSON.stringify($json.staging_tables, null, 2) }}\n\nVAULT TABLES TO CREATE:\n{{ JSON.stringify($json.vault_tables_to_create) }}\n\nEXISTING VAULT TABLES (do not recreate these):\n{{ JSON.stringify($json.existing_vault_tables) }}\n\nBUSINESS KEYS:\n{{ JSON.stringify($json.business_keys) }}\n\nDV2 RULES:\n{{ JSON.stringify($json.dv2_rules, null, 2) }}",
-          "messages": {
-            "messageValues": [
-              {
-                "message": "You are a Data Vault 2.0 modeling agent for an inventory data system.\n\nYou receive staging table schemas (stg_* tables containing extracted source data), a list of vault tables to create, and DV2 modeling rules. Your job is to generate DDL (CREATE TABLE) and load SQL (INSERT...SELECT) for each requested vault table.\n\nIMPORTANT RULES:\n1. Follow the DV2 rules provided exactly — prefixes, suffixes, hash algorithm, required columns.\n2. Use CREATE TABLE IF NOT EXISTS for all DDL.\n3. Source data has been pre-extracted into staging tables with the naming convention stg_<schema>_<table> (e.g., stg_erp_products, stg_procurement_vendors). Your load SQL MUST SELECT from these staging tables. NEVER reference the original source schemas (erp.*, procurement.*, wms.*) in your load SQL.\n4. Vault tables go in the main schema (no prefix).\n5. Hub loads: INSERT only rows whose business key does not already exist (use WHERE NOT EXISTS).\n6. Link loads: INSERT only rows whose combined hash key does not already exist.\n7. Satellite loads: INSERT new versions of changed records. Use hashdiff to detect changes.\n8. Hash expression: md5(UPPER(TRIM(CAST(column AS VARCHAR))))\n9. Composite hash: md5(UPPER(TRIM(CAST(col1 AS VARCHAR))) || '|' || UPPER(TRIM(CAST(col2 AS VARCHAR))))\n10. IMPORTANT DuckDB rule for hashdiff: When computing hashdiff with COALESCE, always CAST non-VARCHAR columns to VARCHAR first. DuckDB cannot implicitly convert '' to numeric types.\n    WRONG: COALESCE(unit_cost, '')\n    RIGHT: COALESCE(CAST(unit_cost AS VARCHAR), '')\n    Apply this to every column in hashdiff concatenations that is not already VARCHAR (e.g. DECIMAL, INTEGER, FLOAT, DATE, TIMESTAMP, BOOLEAN).\n11. Do NOT create tables listed in existing_vault_tables.\n12. Order output: hubs first, then links, then satellites.\n13. One hub per entity: each hub represents exactly one business entity. If you need to track a relationship between two entities (e.g. product + location), create a link table — NOT a composite hub.\n14. Satellite parent matching: every satellite's parent hash key column (e.g. h_product_key in sat_product_details) MUST reference a hub or link that exists in this request or in existing_vault_tables. If the parent table doesn't exist, create it.\n15. Consistent hash keys: the hash key column name in a satellite MUST exactly match the primary hash key column name of its parent hub or link. For example, sat_product_details must use product_hk (matching hub_product's PK), not h_product_key or any other variant.\n16. Hub column naming per DV2 rules: hub hash key = <entity>_hk (VARCHAR(32)), business key = <entity>_bk (VARCHAR). Example: hub_product has product_hk, product_bk. Do NOT use non-standard names like h_inventory_key or product_id as column names in hubs.\n\nRespond ONLY with valid JSON (no markdown code fences):\n{\n  \"vault_tables\": [\n    {\n      \"table_name\": \"hub_product\",\n      \"table_type\": \"HUB\",\n      \"ddl\": \"CREATE TABLE IF NOT EXISTS hub_product (product_hk VARCHAR(32) PRIMARY KEY, product_bk VARCHAR NOT NULL, load_dts TIMESTAMP DEFAULT CURRENT_TIMESTAMP, record_source VARCHAR NOT NULL)\",\n      \"load_sql\": \"INSERT INTO hub_product SELECT ... FROM stg_erp_products WHERE NOT EXISTS ...\"\n    },\n    {\n      \"table_name\": \"sat_product_details\",\n      \"table_type\": \"SATELLITE\",\n      \"ddl\": \"CREATE TABLE IF NOT EXISTS sat_product_details (product_hk VARCHAR(32), load_dts TIMESTAMP, load_end_dts TIMESTAMP, record_source VARCHAR, hashdiff VARCHAR(32), product_name VARCHAR, ...)\",\n      \"load_sql\": \"INSERT INTO sat_product_details SELECT ... FROM stg_erp_products ...\"\n    }\n  ]\n}"
-              }
-            ]
-          },
-          "options": {}
-        },
-        "type": "@n8n/n8n-nodes-langchain.chainLlm",
-        "typeVersion": 1.4,
-        "position": [
-          800,
-          300
-        ],
-        "id": "dv04d4e5-f6a7-b8c9-d0e1-f2a3b4c5d6e7",
-        "name": "Generate DDL"
-      },
-      {
-        "parameters": {
-          "model": {
-            "__rl": true,
-            "mode": "id",
-            "value": "claude-haiku-4-5-20251001"
-          },
-          "options": {
-            "maxTokensToSample": 16384
-          }
-        },
-        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
-        "typeVersion": 1.3,
-        "position": [
-          800,
-          500
-        ],
-        "id": "dv05e5f6-a7b8-c9d0-e1f2-a3b4c5d6e7f8",
-        "name": "Anthropic Chat Model",
-        "credentials": {
-          "anthropicApi": {
-            "id": "WZvvDOFtpiYtjRLz",
-            "name": "Anthropic account"
-          }
-        }
-      },
-      {
-        "parameters": {
-          "jsCode": "const llmOutput = $input.first().json.text;\n\nlet parsed;\ntry {\n  parsed = JSON.parse(llmOutput);\n} catch (e) {\n  // Try to extract JSON from markdown code fences (complete or unclosed)\n  let jsonStr = llmOutput;\n  const fenceMatch = llmOutput.match(/```(?:json)?\\s*([\\s\\S]*?)```/);\n  if (fenceMatch) {\n    jsonStr = fenceMatch[1].trim();\n  } else if (llmOutput.startsWith('```')) {\n    // Unclosed fence (truncated output) — strip opening fence\n    jsonStr = llmOutput.replace(/^```(?:json)?\\s*/, '').trim();\n  }\n\n  try {\n    parsed = JSON.parse(jsonStr);\n  } catch (e2) {\n    // Attempt to recover truncated JSON by closing open structures\n    let recovered = jsonStr;\n    // If truncated mid-string, close the string\n    const quoteCount = (recovered.match(/(?<!\\\\)\"/g) || []).length;\n    if (quoteCount % 2 !== 0) recovered += '\"';\n    // Close any open braces/brackets\n    const opens = (recovered.match(/[{\\[]/g) || []).length;\n    const closes = (recovered.match(/[}\\]]/g) || []).length;\n    // Add missing closing brackets/braces\n    for (let i = 0; i < opens - closes; i++) {\n      // Determine if we need ] or } by scanning backwards for the last unmatched opener\n      const stack = [];\n      for (const ch of recovered) {\n        if (ch === '{' || ch === '[') stack.push(ch);\n        else if (ch === '}' || ch === ']') stack.pop();\n      }\n      if (stack.length > 0) {\n        const last = stack.pop();\n        recovered += last === '{' ? '}' : ']';\n      }\n    }\n    try {\n      parsed = JSON.parse(recovered);\n    } catch (e3) {\n      throw new Error('Could not parse LLM output as JSON: ' + llmOutput.substring(0, 300));\n    }\n  }\n}\n\n// Validate structure\nif (!parsed.vault_tables || !Array.isArray(parsed.vault_tables)) {\n  throw new Error('LLM output missing vault_tables array');\n}\n\nfor (const table of parsed.vault_tables) {\n  if (!table.table_name || !table.table_type || !table.ddl || !table.load_sql) {\n    throw new Error('Vault table entry missing required fields: ' + JSON.stringify(table).substring(0, 200));\n  }\n}\n\nreturn {\n  json: {\n    status: 'success',\n    vault_tables: parsed.vault_tables\n  }\n};"
-        },
-        "type": "n8n-nodes-base.code",
-        "typeVersion": 2,
-        "position": [
-          1100,
-          300
-        ],
-        "id": "dv06f6a7-b8c9-d0e1-f2a3-b4c5d6e7f8a9",
-        "name": "Parse Output"
-      },
-      {
-        "parameters": {
-          "respondWith": "json",
-          "responseBody": "={{ $json }}",
-          "options": {}
-        },
-        "type": "n8n-nodes-base.respondToWebhook",
-        "typeVersion": 1.1,
-        "position": [
-          1400,
-          300
-        ],
-        "id": "dv07a7b8-c9d0-e1f2-a3b4-c5d6e7f8a9b0",
-        "name": "Respond to Webhook"
-      }
-    ],
-    "connections": {
-      "Webhook": {
-        "main": [
-          [
-            {
-              "node": "Read File",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Read File": {
-        "main": [
-          [
-            {
-              "node": "Merge Context",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Merge Context": {
-        "main": [
-          [
-            {
-              "node": "Generate DDL",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Generate DDL": {
-        "main": [
-          [
-            {
-              "node": "Parse Output",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Anthropic Chat Model": {
-        "ai_languageModel": [
-          [
-            {
-              "node": "Generate DDL",
-              "type": "ai_languageModel",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Parse Output": {
-        "main": [
-          [
-            {
-              "node": "Respond to Webhook",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      }
-    },
-    "authors": "Thinh Pham",
-    "name": null,
-    "description": null,
-    "autosaved": false,
-    "workflowPublishHistory": [
-      {
-        "createdAt": "2026-03-27T04:03:56.697Z",
-        "id": 127,
-        "workflowId": "26bHrzBpfG5WS12G",
-        "versionId": "172f961c-da62-4665-9ac7-c9a2f9bd8834",
-        "event": "activated",
-        "userId": "4d308f1a-e8cd-468b-bae5-ac7bc92538cc"
-      },
-      {
-        "createdAt": "2026-03-27T04:03:56.689Z",
-        "id": 126,
-        "workflowId": "26bHrzBpfG5WS12G",
-        "versionId": "172f961c-da62-4665-9ac7-c9a2f9bd8834",
-        "event": "deactivated",
-        "userId": "4d308f1a-e8cd-468b-bae5-ac7bc92538cc"
-      }
-    ]
   }
 }

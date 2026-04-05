@@ -18,22 +18,17 @@
     },
     {
       "parameters": {
-        "toolDescription": "Run a SQL query against either the source database (source.duckdb) or the vault database (vault.duckdb). Use database=/data/source.duckdb for raw ERP/procurement/WMS data and database=/data/vault.duckdb for vault and mart tables.",
+        "toolDescription": "Run a follow-up SQL query against the vault database (vault.duckdb) ONLY. Use this to explore mart results returned by ask_inventory_question. NEVER query source.duckdb directly — always use ask_inventory_question for source data questions.",
         "method": "POST",
         "url": "http://duckdb-service:8001/query",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "{\"sql\": \"{sql}\", \"database\": \"{database}\"}",
+        "jsonBody": "{\"sql\": \"{sql}\", \"database\": \"/data/vault.duckdb\"}",
         "placeholderDefinitions": {
           "values": [
             {
               "name": "sql",
-              "description": "The SQL query to execute. Use schema-qualified names (e.g. erp.products) for source.duckdb tables, and unqualified names (e.g. hub_product) for vault.duckdb tables.",
-              "type": "string"
-            },
-            {
-              "name": "database",
-              "description": "The database file path to query. Must be either /data/source.duckdb (for raw source data in erp, procurement, wms schemas) or /data/vault.duckdb (for vault hub/link/satellite tables and mart tables).",
+              "description": "The SQL query to execute against vault.duckdb. Use unqualified names (e.g. hub_product, mart_product_count).",
               "type": "string"
             }
           ]
@@ -51,11 +46,11 @@
     {
       "parameters": {
         "name": "describe_schema",
-        "description": "List all tables available in a database. Returns table names grouped by schema. Use database=/data/source.duckdb for source tables or database=/data/vault.duckdb for vault and mart tables.",
+        "description": "List all tables in the vault database (vault.duckdb). Shows hub, link, satellite, and mart tables. For source database questions, use ask_inventory_question instead.",
         "language": "javaScript",
-        "jsCode": "const database = query.database || \"/data/vault.duckdb\";\nconst url = \"http://duckdb-service:8001/query\";\nconst sql = \"SELECT table_schema, table_name, table_type FROM information_schema.tables ORDER BY table_schema, table_name\";\n\ntry {\n  const res = await this.helpers.httpRequest({\n    method: \"POST\",\n    url,\n    headers: { \"Content-Type\": \"application/json\" },\n    body: { sql, database },\n    json: true\n  });\n  const rows = res.rows || [];\n  const grouped = {};\n  for (const row of rows) {\n    const schema = row.table_schema || \"main\";\n    if (!grouped[schema]) grouped[schema] = [];\n    grouped[schema].push(row.table_name);\n  }\n  return JSON.stringify({ database, schemas: grouped }, null, 2);\n} catch (e) {\n  return JSON.stringify({ error: e.message, database });\n}",
+        "jsCode": "const database = \"/data/vault.duckdb\";\nconst url = \"http://duckdb-service:8001/query\";\nconst sql = \"SELECT table_schema, table_name, table_type FROM information_schema.tables ORDER BY table_schema, table_name\";\n\ntry {\n  const res = await this.helpers.httpRequest({\n    method: \"POST\",\n    url,\n    headers: { \"Content-Type\": \"application/json\" },\n    body: { sql, database },\n    json: true\n  });\n  const rows = res.rows || [];\n  const grouped = {};\n  for (const row of rows) {\n    const schema = row.table_schema || \"main\";\n    if (!grouped[schema]) grouped[schema] = [];\n    grouped[schema].push(row.table_name);\n  }\n  return JSON.stringify({ database, schemas: grouped }, null, 2);\n} catch (e) {\n  return JSON.stringify({ error: e.message, database });\n}",
         "specifyInputSchema": true,
-        "inputSchema": "{\"type\":\"object\",\"properties\":{\"database\":{\"type\":\"string\",\"description\":\"Database file path: /data/source.duckdb or /data/vault.duckdb\"}},\"required\":[\"database\"]}"
+        "inputSchema": "{\"type\":\"object\",\"properties\":{},\"required\":[]}"
       },
       "type": "@n8n/n8n-nodes-langchain.toolCode",
       "typeVersion": 1.3,
@@ -68,7 +63,7 @@
     },
     {
       "parameters": {
-        "toolDescription": "Send a natural language question about inventory to the Dispatcher agent. The agent will query source data, build Data Vault tables if needed, and return structured results including the mart data, routing decision, and any data quality issues.",
+        "toolDescription": "ALWAYS use this tool first for ANY question about inventory data, source databases, or the data pipeline. The Dispatcher agent handles everything: answering business questions, querying source metadata, building vault tables, and returning results. Only use run_query or describe_schema for follow-up exploration of results already returned by this tool.",
         "method": "POST",
         "url": "http://n8n:5678/webhook/dispatcher",
         "sendBody": true,
